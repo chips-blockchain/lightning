@@ -101,18 +101,18 @@ struct plugin_hook {
 const struct feature_set *plugin_feature_set(const struct plugin *p);
 
 /* Helper to create a JSONRPC2 request stream. Send it with `send_outreq`. */
-struct out_req *
-jsonrpc_request_start_(struct plugin *plugin, struct command *cmd,
-		       const char *method,
-		       struct command_result *(*cb)(struct command *command,
-						    const char *buf,
-						    const jsmntok_t *result,
-						    void *arg),
-		       struct command_result *(*errcb)(struct command *command,
-						       const char *buf,
-						       const jsmntok_t *result,
-						       void *arg),
-		       void *arg);
+struct out_req *jsonrpc_request_start_(struct plugin *plugin,
+				       struct command *cmd,
+				       const char *method,
+				       struct command_result *(*cb)(struct command *command,
+								    const char *buf,
+								    const jsmntok_t *result,
+								    void *arg),
+				       struct command_result *(*errcb)(struct command *command,
+								       const char *buf,
+								       const jsmntok_t *result,
+								       void *arg),
+				       void *arg);
 
 #define jsonrpc_request_start(plugin, cmd, method, cb, errcb, arg)	\
 	jsonrpc_request_start_((plugin), (cmd), (method),		\
@@ -145,12 +145,12 @@ struct json_stream *jsonrpc_stream_fail_data(struct command *cmd,
 
 /* This command is finished, here's the response (the content of the
  * "result" or "error" field) */
-struct command_result *WARN_UNUSED_RESULT
-command_finished(struct command *cmd, struct json_stream *response);
+WARN_UNUSED_RESULT
+struct command_result *command_finished(struct command *cmd, struct json_stream *response);
 
 /* Helper for a command that'll be finished in a callback. */
-struct command_result *WARN_UNUSED_RESULT
-command_still_pending(struct command *cmd);
+WARN_UNUSED_RESULT
+struct command_result *command_still_pending(struct command *cmd);
 
 /* Helper to create a zero or single-value JSON object; if @str is NULL,
  * object is empty. */
@@ -181,11 +181,6 @@ struct command_result *command_err_raw(struct command *cmd,
 struct command_result *WARN_UNUSED_RESULT
 command_success(struct command *cmd, const struct json_out *result);
 
-/* Simple version where we just want to send a string, or NULL means an empty
- * result object.  @cmd cannot be NULL. */
-struct command_result *WARN_UNUSED_RESULT
-command_success_str(struct command *cmd, const char *str);
-
 /* End a hook normally (with "result": "continue") */
 struct command_result *WARN_UNUSED_RESULT
 command_hook_success(struct command *cmd);
@@ -199,8 +194,8 @@ void rpc_scan(struct plugin *plugin,
 	      ...);
 
 /* Send an async rpc request to lightningd. */
-struct command_result *
-send_outreq(struct plugin *plugin, const struct out_req *req);
+struct command_result *send_outreq(struct plugin *plugin,
+				   const struct out_req *req);
 
 /* Callback to just forward error and close request; @cmd cannot be NULL */
 struct command_result *forward_error(struct command *cmd,
@@ -218,6 +213,10 @@ struct command_result *forward_result(struct command *cmd,
  * must return this eventually, though they may do so via a convoluted
  * send_req() path. */
 struct command_result *timer_complete(struct plugin *p);
+
+/* Signals that we've completed a command. Useful for when
+ * there's no `cmd` present */
+struct command_result *command_done(void);
 
 /* Access timer infrastructure to add a timer.
  *
@@ -241,6 +240,13 @@ void plugin_log(struct plugin *p, enum log_level l, const char *fmt, ...) PRINTF
 /* Notify the caller of something. */
 struct json_stream *plugin_notify_start(struct command *cmd, const char *method);
 void plugin_notify_end(struct command *cmd, struct json_stream *js);
+
+/* Send a notification for a custom notification topic. These are sent
+ * to lightningd and distributed to subscribing plugins. */
+struct json_stream *plugin_notification_start(struct plugin *plugins,
+					      const char *method);
+void plugin_notification_end(struct plugin *plugin,
+			     struct json_stream *stream TAKES);
 
 /* Convenience wrapper for notify "message" */
 void plugin_notify_message(struct command *cmd,
@@ -289,6 +295,8 @@ void NORETURN LAST_ARG_NULL plugin_main(char *argv[],
 					size_t num_notif_subs,
 					const struct plugin_hook *hook_subs,
 					size_t num_hook_subs,
+					const char **notif_topics,
+					size_t num_notif_topics,
 					...);
 
 struct listpeers_channel {
@@ -326,21 +334,6 @@ struct createonion_response {
 struct createonion_response *json_to_createonion_response(const tal_t *ctx,
 							  const char *buffer,
 							  const jsmntok_t *toks);
-
-enum route_hop_style {
-	ROUTE_HOP_LEGACY = 1,
-	ROUTE_HOP_TLV = 2,
-};
-
-struct route_hop {
-	struct short_channel_id channel_id;
-	int direction;
-	struct node_id nodeid;
-	struct amount_msat amount;
-	u32 delay;
-	struct pubkey *blinding;
-	enum route_hop_style style;
-};
 
 struct route_hop *json_to_route(const tal_t *ctx, const char *buffer,
 				const jsmntok_t *toks);

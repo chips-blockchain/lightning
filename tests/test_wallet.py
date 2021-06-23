@@ -12,7 +12,6 @@ from utils import (
 import os
 import pytest
 import subprocess
-import sys
 import unittest
 
 
@@ -441,27 +440,34 @@ def test_reserveinputs(node_factory, bitcoind, chainparams):
         l1.rpc.reserveinputs(psbt)
 
     assert all(o['reserved'] for o in l1.rpc.listfunds()['outputs'])
+    reserveheight = bitcoind.rpc.getblockchaininfo()['blocks'] + 72
+    assert all(o['reserved_to_block'] == reserveheight for o in l1.rpc.listfunds()['outputs'])
 
     # Unreserve as a batch.
     psbt = bitcoind.rpc.createpsbt([{'txid': out[0], 'vout': out[1]} for out in outputs], [])
     l1.rpc.unreserveinputs(psbt)
     assert not any(o['reserved'] for o in l1.rpc.listfunds()['outputs'])
+    assert not any('reserved_to_block' in o for o in l1.rpc.listfunds()['outputs'])
 
     # Reserve twice fails unless exclusive.
     l1.rpc.reserveinputs(psbt)
     with pytest.raises(RpcError, match=r"already reserved"):
         l1.rpc.reserveinputs(psbt)
     l1.rpc.reserveinputs(psbt, False)
+    assert all(o['reserved_to_block'] == reserveheight + 72 for o in l1.rpc.listfunds()['outputs'])
     l1.rpc.unreserveinputs(psbt)
     assert all(o['reserved'] for o in l1.rpc.listfunds()['outputs'])
+    assert all(o['reserved_to_block'] == reserveheight for o in l1.rpc.listfunds()['outputs'])
 
     # Stays reserved across restarts.
     l1.restart()
     assert all(o['reserved'] for o in l1.rpc.listfunds()['outputs'])
+    assert all(o['reserved_to_block'] == reserveheight for o in l1.rpc.listfunds()['outputs'])
 
     # Final unreserve works.
     l1.rpc.unreserveinputs(psbt)
     assert not any(o['reserved'] for o in l1.rpc.listfunds()['outputs'])
+    assert not any('reserved_to_block' in o for o in l1.rpc.listfunds()['outputs'])
 
 
 def test_fundpsbt(node_factory, bitcoind, chainparams):
@@ -985,10 +991,9 @@ def test_transaction_annotations(node_factory, bitcoind):
 
 
 @unittest.skipIf(VALGRIND, "It does not play well with prompt and key derivation.")
-@unittest.skipIf(not sys.stdout.isatty(), "Cannot")
 def test_hsm_secret_encryption(node_factory):
     l1 = node_factory.get_node(may_fail=True)  # May fail when started without key
-    password = "reckful\n"
+    password = "reckful&é🍕\n"
     # We need to simulate a terminal to use termios in `lightningd`.
     master_fd, slave_fd = os.openpty()
 
@@ -1028,11 +1033,21 @@ def test_hsm_secret_encryption(node_factory):
     os.write(master_fd, password.encode("utf-8"))
     l1.daemon.wait_for_log("Server started with public key")
     assert id == l1.rpc.getinfo()["id"]
+    l1.stop()
+
+    # We can restore the same wallet with the same password provided through stdin
+    l1.daemon.start(stdin=subprocess.PIPE, wait_for_initialized=False)
+    l1.daemon.proc.stdin.write(password.encode("utf-8"))
+    l1.daemon.proc.stdin.write(password.encode("utf-8"))
+    l1.daemon.proc.stdin.flush()
+    l1.daemon.wait_for_log("Server started with public key")
+    assert id == l1.rpc.getinfo()["id"]
 
 
 class HsmTool(TailableProc):
     """Helper for testing the hsmtool as a subprocess"""
     def __init__(self, *args):
+        self.prefix = "hsmtool"
         TailableProc.__init__(self)
         assert hasattr(self, "env")
         self.cmd_line = ["tools/hsmtool", *args]
@@ -1041,7 +1056,7 @@ class HsmTool(TailableProc):
 @unittest.skipIf(VALGRIND, "It does not play well with prompt and key derivation.")
 def test_hsmtool_secret_decryption(node_factory):
     l1 = node_factory.get_node()
-    password = "reckless\n"
+    password = "reckless123#{ù}\n"
     hsm_path = os.path.join(l1.daemon.lightning_dir, TEST_NETWORK, "hsm_secret")
     # We need to simulate a terminal to use termios in `lightningd`.
     master_fd, slave_fd = os.openpty()
@@ -1121,6 +1136,26 @@ def test_hsmtool_secret_decryption(node_factory):
     l1.daemon.opts.pop("encrypted-hsm")
     l1.daemon.start(stdin=slave_fd, wait_for_initialized=True)
     assert node_id == l1.rpc.getinfo()["id"]
+
+    # We can roundtrip encryption and decryption using a password provided
+    # through stdin.
+    hsmtool = HsmTool("encrypt", hsm_path)
+    hsmtool.start(stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE)
+    hsmtool.proc.stdin.write(password.encode("utf-8"))
+    hsmtool.proc.stdin.write(password.encode("utf-8"))
+    hsmtool.proc.stdin.flush()
+    hsmtool.wait_for_log("Successfully encrypted")
+    assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
+
+    master_fd, slave_fd = os.openpty()
+    hsmtool = HsmTool("decrypt", hsm_path)
+    hsmtool.start(stdin=slave_fd,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    hsmtool.wait_for_log("Enter hsm_secret password:")
+    os.write(master_fd, password.encode("utf-8"))
+    hsmtool.wait_for_log("Successfully decrypted")
+    assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
 
 
 @unittest.skipIf(TEST_NETWORK == 'liquid-regtest', '')
@@ -1336,3 +1371,31 @@ def test_repro_4258(node_factory, bitcoind):
     assert(len(tx['vin']) == 1)
     i0 = tx['vin'][0]
     assert([i0['txid'], i0['vout']] == [out['txid'], out['output']])
+
+
+@unittest.skipIf(TEST_NETWORK == 'liquid-regtest', "Uses regtest addresses")
+def test_withdraw_bech32m(node_factory, bitcoind):
+    l1 = node_factory.get_node()
+    l1.fundwallet(10000000)
+
+    # Based on BIP-320, but all changed to regtest.
+    addrs = ("BCRT1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KYGT080",
+             "bcrt1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qzf4jry",
+             "bcrt1pw508d6qejxtdg4y5r3zarvary0c5xw7kw508d6qejxtdg4y5r3zarvary0c5xw7k0ylj56",
+             "BCRT1SW50QT2UWHA",
+             "bcrt1zw508d6qejxtdg4y5r3zarvaryv2wuatf",
+             "bcrt1qqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvseswlauz7",
+             "bcrt1pqqqqp399et2xygdj5xreqhjjvcmzhxw4aywxecjdzew6hylgvsesyga46z",
+             "bcrt1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqc8gma6")
+
+    for addr in addrs:
+        l1.rpc.withdraw(addr, 10**3)
+        bitcoind.generate_block(1, wait_for_mempool=1)
+        print(l1.rpc.listfunds()['outputs'])
+        wait_for(lambda: [o for o in l1.rpc.listfunds()['outputs'] if o['status'] == 'confirmed' and not o['reserved']] != [])
+
+    # Test multiwithdraw
+    args = []
+    for addr in addrs:
+        args += [{addr: 10**3}]
+    l1.rpc.multiwithdraw(args)["txid"]

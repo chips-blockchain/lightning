@@ -79,6 +79,7 @@ TEST_DEBUG = env("TEST_DEBUG", "0") == "1"
 SLOW_MACHINE = env("SLOW_MACHINE", "0") == "1"
 DEPRECATED_APIS = env("DEPRECATED_APIS", "0") == "1"
 TIMEOUT = int(env("TIMEOUT", 180 if SLOW_MACHINE else 60))
+EXPERIMENTAL_DUAL_FUND = env("EXPERIMENTAL_DUAL_FUND", "0") == "1"
 
 
 def wait_for(success, timeout=TIMEOUT):
@@ -283,11 +284,11 @@ class TailableProc(object):
                     if self.is_in_log(r):
                         print("({} was previously in logs!)".format(r))
                 raise TimeoutError('Unable to find "{}" in logs.'.format(exs))
-            elif not self.running:
-                raise ValueError('Process died while waiting for logs')
 
             with self.logs_cond:
                 if pos >= len(self.logs):
+                    if not self.running:
+                        raise ValueError('Process died while waiting for logs')
                     self.logs_cond.wait(1)
                     continue
 
@@ -600,7 +601,17 @@ class PrettyPrintingLightningRpc(LightningRpc):
     eyes. It has some overhead since we re-serialize the request and
     result to json in order to pretty print it.
 
+    Also validates (optional) schemas for us.
     """
+    def __init__(self, socket_path, executor=None, logger=logging,
+                 patch_json=True, jsonschemas={}):
+        super().__init__(
+            socket_path,
+            executor,
+            logger,
+            patch_json,
+        )
+        self.jsonschemas = jsonschemas
 
     def call(self, method, payload=None):
         id = self.next_id
@@ -614,6 +625,10 @@ class PrettyPrintingLightningRpc(LightningRpc):
             "id": id,
             "result": res
         }, indent=2))
+
+        if method in self.jsonschemas:
+            self.jsonschemas[method].validate(res)
+
         return res
 
 
@@ -624,6 +639,7 @@ class LightningNode(object):
                  allow_warning=False,
                  allow_bad_gossip=False,
                  db=None, port=None, disconnect=None, random_hsm=None, options=None,
+                 jsonschemas={},
                  **kwargs):
         self.bitcoin = bitcoind
         self.executor = executor
@@ -638,7 +654,7 @@ class LightningNode(object):
         self.rc = 0
 
         socket_path = os.path.join(lightning_dir, TEST_NETWORK, "lightning-rpc").format(node_id)
-        self.rpc = PrettyPrintingLightningRpc(socket_path, self.executor)
+        self.rpc = PrettyPrintingLightningRpc(socket_path, self.executor, jsonschemas=jsonschemas)
 
         self.daemon = LightningD(
             lightning_dir, bitcoindproxy=bitcoind.get_proxy(),
@@ -664,6 +680,8 @@ class LightningNode(object):
                 self.daemon.env["LIGHTNINGD_DEV_MEMLEAK"] = "1"
             if not may_reconnect:
                 self.daemon.opts["dev-no-reconnect"] = None
+        if EXPERIMENTAL_DUAL_FUND:
+            self.daemon.opts["experimental-dual-fund"] = None
 
         if options is not None:
             self.daemon.opts.update(options)
@@ -711,11 +729,12 @@ class LightningNode(object):
                 r'Funding tx {} depth'.format(fundingtx['txid']))
         return {'address': addr, 'wallettxid': wallettxid, 'fundingtx': fundingtx}
 
-    def fundwallet(self, sats, addrtype="p2sh-segwit"):
+    def fundwallet(self, sats, addrtype="p2sh-segwit", mine_block=True):
         addr = self.rpc.newaddr(addrtype)[addrtype]
         txid = self.bitcoin.rpc.sendtoaddress(addr, sats / 10**8)
-        self.bitcoin.generate_block(1)
-        self.daemon.wait_for_log('Owning output .* txid {} CONFIRMED'.format(txid))
+        if mine_block:
+            self.bitcoin.generate_block(1)
+            self.daemon.wait_for_log('Owning output .* txid {} CONFIRMED'.format(txid))
         return addr, txid
 
     def fundbalancedchannel(self, remote_node, total_capacity, announce=True):
@@ -735,6 +754,10 @@ class LightningNode(object):
             # expected to contribute that same amount
             chan_capacity = total_capacity // 2
             total_capacity = chan_capacity * 2
+            # Tell the node to equally dual-fund the channel
+            remote_node.rpc.call('funderupdate', {'policy': 'match',
+                                                  'policy_mod': 100,
+                                                  'fuzz_percent': 0})
         else:
             chan_capacity = total_capacity
 
@@ -864,8 +887,7 @@ class LightningNode(object):
                 txnum = i
 
         scid = "{}x{}x{}".format(self.bitcoin.rpc.getblockcount(),
-                                 txnum,
-                                 get_tx_p2wsh_outnum(self.bitcoin, res['tx'], amount))
+                                 txnum, res['outnum'])
 
         if wait_for_active:
             self.wait_channel_active(scid)
@@ -1015,9 +1037,9 @@ class LightningNode(object):
             params = r['params']
             if params == [2, 'CONSERVATIVE']:
                 feerate = feerates[0] * 4
-            elif params == [3, 'CONSERVATIVE']:
+            elif params == [6, 'ECONOMICAL']:
                 feerate = feerates[1] * 4
-            elif params == [4, 'ECONOMICAL']:
+            elif params == [12, 'ECONOMICAL']:
                 feerate = feerates[2] * 4
             elif params == [100, 'ECONOMICAL']:
                 feerate = feerates[3] * 4
@@ -1190,7 +1212,7 @@ class NodeFactory(object):
     """A factory to setup and start `lightningd` daemons.
     """
     def __init__(self, request, testname, bitcoind, executor, directory,
-                 db_provider, node_cls, throttler):
+                 db_provider, node_cls, throttler, jsonschemas):
         if request.node.get_closest_marker("slow_test") and SLOW_MACHINE:
             self.valgrind = False
         else:
@@ -1205,6 +1227,7 @@ class NodeFactory(object):
         self.db_provider = db_provider
         self.node_cls = node_cls
         self.throttler = throttler
+        self.jsonschemas = jsonschemas
 
     def split_options(self, opts):
         """Split node options from cli options
@@ -1283,6 +1306,7 @@ class NodeFactory(object):
         node = self.node_cls(
             node_id, lightning_dir, self.bitcoind, self.executor, self.valgrind, db=db,
             port=port, options=options, may_fail=may_fail or expect_fail,
+            jsonschemas=self.jsonschemas,
             **kwargs
         )
 

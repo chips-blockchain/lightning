@@ -24,7 +24,7 @@ CCANDIR := ccan
 
 # Where we keep the BOLT RFCs
 BOLTDIR := ../lightning-rfc/
-DEFAULT_BOLTVERSION := b201efe0546120c14bf154ce5f4e18da7243fe7a
+DEFAULT_BOLTVERSION := 3508e4e85d26240ae7492c3d2e02770cdc360fe9
 # Can be overridden on cmdline.
 BOLTVERSION := $(DEFAULT_BOLTVERSION)
 
@@ -81,6 +81,12 @@ endif
 # (method=thread to support xdist)
 PYTEST_OPTS := -v -p no:logging $(PYTEST_OPTS)
 PYTHONPATH=$(shell pwd)/contrib/pyln-client:$(shell pwd)/contrib/pyln-testing:$(shell pwd)/contrib/pyln-proto/:$(shell pwd)/external/lnprototest:$(shell pwd)/contrib/pyln-spec/bolt1:$(shell pwd)/contrib/pyln-spec/bolt2:$(shell pwd)/contrib/pyln-spec/bolt4:$(shell pwd)/contrib/pyln-spec/bolt7
+# Collect generated python files to be excluded from lint checks
+PYTHON_GENERATED=
+
+# Options to pass to cppcheck. Mostly used to exclude files that are
+# generated with external tools that we don't have control over
+CPPCHECK_OPTS=-q --language=c --std=c11 --error-exitcode=1 --suppressions-list=.cppcheck-suppress --inline-suppr
 
 # This is where we add new features as bitcoin adds them.
 FEATURES :=
@@ -252,6 +258,11 @@ endif
 
 default: show-flags all-programs all-test-programs doc-all
 
+ifneq ($(SUPPRESS_GENERATION),1)
+FORCE = FORCE
+FORCE::
+endif
+
 show-flags: config.vars
 	@$(ECHO) "CC: $(CC) $(CFLAGS) -c -o"
 	@$(ECHO) "LD: $(LINK.o) $(filter-out %.a,$^) $(LOADLIBES) $(EXTERNAL_LDLIBS) $(LDLIBS) -o"
@@ -274,32 +285,38 @@ else
 EXP :=
 endif
 
+# tools/update-mocks.sh does nasty recursive make, must not do this!
+ifeq ($(SUPPRESS_GENERATION),1)
+SHA256STAMP_CHANGED = false
+SHA256STAMP = exit 1
+else
 # Git doesn't maintain timestamps, so we only regen if sources actually changed:
 # We place the SHA inside some generated files so we can tell if they need updating.
 # Usage: $(call SHA256STAMP_CHANGED)
-SHA256STAMP_CHANGED = [ x"`sed -n 's/.*SHA256STAMP://p' $@ 2>/dev/null`" != x"`cat $(sort $(filter-out FORCE,$^)) | $(SHA256SUM) | cut -c1-64`" ]
-# Usage: $(call SHA256STAMP,commentprefix)
-SHA256STAMP = echo '$(1) SHA256STAMP:'`cat $(sort $(filter-out FORCE,$^)) | $(SHA256SUM) | cut -c1-64` >> $@
+SHA256STAMP_CHANGED = [ x"`sed -n 's/.*SHA256STAMP:\([a-f0-9]*\).*/\1/p' $@ 2>/dev/null`" != x"`cat $(sort $(filter-out FORCE,$^)) | $(SHA256SUM) | cut -c1-64`" ]
+# Usage: $(call SHA256STAMP,commentprefix,commentpostfix)
+SHA256STAMP = echo "$(1) SHA256STAMP:"`cat $(sort $(filter-out FORCE,$^)) | $(SHA256SUM) | cut -c1-64`"$(2)" >> $@
+endif
 
 # generate-wire.py --page [header|impl] hdrfilename wirename < csv > file
 %_wiregen.h: %_wire.csv $(WIRE_GEN_DEPS)
 	@if $(call SHA256STAMP_CHANGED); then if [ "$$NO_PYTHON" = 1 ]; then echo "Error: NO_PYTHON on $@"; exit 1; fi; \
-		$(call VERBOSE,"wiregen $@",tools/generate-wire.py --page header $($@_args) $@ `basename $< .csv | sed 's/_exp_/_/'` < $< > $@ && $(call SHA256STAMP,//)); \
+		$(call VERBOSE,"wiregen $@",tools/generate-wire.py --page header $($@_args) $@ `basename $< .csv | sed 's/_exp_/_/'` < $< > $@ && $(call SHA256STAMP,//,)); \
 	fi
 
 %_wiregen.c: %_wire.csv $(WIRE_GEN_DEPS)
 	@if $(call SHA256STAMP_CHANGED); then if [ "$$NO_PYTHON" = 1 ]; then echo "Error: NO_PYTHON on $@"; exit 1; fi; \
-		$(call VERBOSE,"wiregen $@",tools/generate-wire.py --page impl $($@_args) ${@:.c=.h} `basename $< .csv | sed 's/_exp_/_/'` < $< > $@ && $(call SHA256STAMP,//)); \
+		$(call VERBOSE,"wiregen $@",tools/generate-wire.py --page impl $($@_args) ${@:.c=.h} `basename $< .csv | sed 's/_exp_/_/'` < $< > $@ && $(call SHA256STAMP,//,)); \
 	fi
 
 %_printgen.h: %_wire.csv $(WIRE_GEN_DEPS)
 	@if $(call SHA256STAMP_CHANGED); then if [ "$$NO_PYTHON" = 1 ]; then echo "Error: NO_PYTHON on $@"; exit 1; fi; \
-		$(call VERBOSE,"printgen $@",tools/generate-wire.py -s -P --page header $($@_args) $@ `basename $< .csv | sed 's/_exp_/_/'` < $< > $@ && $(call SHA256STAMP,//)); \
+		$(call VERBOSE,"printgen $@",tools/generate-wire.py -s -P --page header $($@_args) $@ `basename $< .csv | sed 's/_exp_/_/'` < $< > $@ && $(call SHA256STAMP,//,)); \
 	fi
 
 %_printgen.c: %_wire.csv $(WIRE_GEN_DEPS)
 	@if $(call SHA256STAMP_CHANGED); then  if [ "$$NO_PYTHON" = 1 ]; then echo "Error: NO_PYTHON on $@"; exit 1; fi; \
-		$(call VERBOSE,"printgen $@",tools/generate-wire.py -s -P --page impl $($@_args) ${@:.c=.h} `basename $< .csv | sed 's/_exp_/_/'` < $< > $@ && $(call SHA256STAMP,//)); \
+		$(call VERBOSE,"printgen $@",tools/generate-wire.py -s -P --page impl $($@_args) ${@:.c=.h} `basename $< .csv | sed 's/_exp_/_/'` < $< > $@ && $(call SHA256STAMP,//,)); \
 	fi
 
 include external/Makefile
@@ -320,6 +337,7 @@ include devtools/Makefile
 include tools/Makefile
 include plugins/Makefile
 include tests/plugins/Makefile
+include contrib/libhsmd_python/Makefile
 ifneq ($(FUZZING),0)
 	include tests/fuzz/Makefile
 endif
@@ -356,7 +374,7 @@ ALL_OBJS := $(ALL_C_SOURCES:.c=.o)
 
 # We always regen wiregen and printgen files, since SHA256STAMP protects against
 # spurious rebuilds.
-$(filter %printgen.h %printgen.c %wiregen.h %wiregen.c, $(ALL_C_HEADERS) $(ALL_C_SOURCES)): FORCE
+$(filter %printgen.h %printgen.c %wiregen.h %wiregen.c, $(ALL_C_HEADERS) $(ALL_C_SOURCES)): $(FORCE)
 
 ifneq ($(TEST_GROUP_COUNT),)
 PYTEST_OPTS += --test-group=$(TEST_GROUP) --test-group-count=$(TEST_GROUP_COUNT)
@@ -380,10 +398,14 @@ check-protos: $(ALL_PROGRAMS)
 ifeq ($(PYTEST),)
 	@echo "py.test is required to run the protocol tests, please install using 'pip3 install -r requirements.txt', and rerun 'configure'."; false
 else
+ifeq ($(DEVELOPER),1)
 	@(cd external/lnprototest && PYTHONPATH=$(PYTHONPATH) LIGHTNING_SRC=../.. $(PYTEST) --runner lnprototest.clightning.Runner $(PYTEST_OPTS))
+else
+	@echo "lnprototest target requires DEVELOPER=1, skipping"
+endif
 endif
 
-pytest: $(ALL_PROGRAMS)
+pytest: $(ALL_PROGRAMS) $(ALL_TEST_PROGRAMS)
 ifeq ($(PYTEST),)
 	@echo "py.test is required to run the integration tests, please install using 'pip3 install -r requirements.txt', and rerun 'configure'."
 	exit 1
@@ -454,7 +476,7 @@ check-python-flake8:
 	@# E501 line too long (N > 79 characters)
 	@# E731 do not assign a lambda expression, use a def
 	@# W503: line break before binary operator
-	@flake8 --ignore=E501,E731,W503 ${PYSRC}
+	@flake8 --ignore=E501,E731,W503 --exclude $(shell echo ${PYTHON_GENERATED} | sed 's/ \+/,/g') ${PYSRC}
 
 check-pytest-pyln-proto:
 	PATH=$(PYLN_PATH) PYTHONPATH=$(PYTHONPATH) $(PYTEST) contrib/pyln-proto/tests/
@@ -464,10 +486,10 @@ check-includes: check-src-includes check-hdr-includes
 
 # cppcheck gets confused by list_for_each(head, i, list): thinks i is uninit.
 .cppcheck-suppress:
-	@git ls-files -- "*.c" "*.h" | grep -vE '^ccan/' | xargs grep -n '_for_each' | sed 's/\([^:]*:.*\):.*/uninitvar:\1/' > $@
+	@git ls-files -- "*.c" "*.h" | grep -vE '^(ccan|contrib)/' | xargs grep -n '_for_each' | sed 's/\([^:]*:.*\):.*/uninitvar:\1/' > $@
 
 check-cppcheck: .cppcheck-suppress
-	@trap 'rm -f .cppcheck-suppress' 0; git ls-files -- "*.c" "*.h" | grep -vE '^ccan/' | xargs cppcheck -q --language=c --std=c11 --error-exitcode=1 --suppressions-list=.cppcheck-suppress --inline-suppr
+	@trap 'rm -f .cppcheck-suppress' 0; git ls-files -- "*.c" "*.h" | grep -vE '^ccan/' | xargs cppcheck  ${CPPCHECK_OPTS}
 
 check-shellcheck:
 	@git ls-files -- "*.sh" | xargs shellcheck
@@ -479,7 +501,7 @@ check-tmpctx:
 	@if git grep -n 'tal_free[(]tmpctx)' | grep -Ev '^ccan/|/test/|^common/setup.c:|^common/utils.c:'; then echo "Don't free tmpctx!">&2; exit 1; fi
 
 check-discouraged-functions:
-	@if git grep -E "[^a-z_/](fgets|fputs|gets|scanf|sprintf)\(" -- "*.c" "*.h" ":(exclude)ccan/"; then exit 1; fi
+	@if git grep -E "[^a-z_/](fgets|fputs|gets|scanf|sprintf)\(" -- "*.c" "*.h" ":(exclude)ccan/" ":(exclude)contrib/"; then exit 1; fi
 
 # Don't access amount_msat and amount_sat members directly without a good reason
 # since it risks overflow.
@@ -516,9 +538,8 @@ ncc: ${TARGET_DIR}/libwally-core-build/src/libwallycore.la
 	$(MAKE) CC="ncc -ncgcc -ncld -ncfabs" AR=nccar LD=nccld
 
 # Ignore test/ directories.
-TAGS: FORCE
+TAGS:
 	$(RM) TAGS; find * -name test -type d -prune -o -name '*.[ch]' -print -o -name '*.py' -print | xargs etags --append
-FORCE::
 
 ccan/ccan/cdump/tools/cdump-enumstr: ccan/ccan/cdump/tools/cdump-enumstr.o $(CDUMP_OBJS) $(CCAN_OBJS)
 
@@ -526,7 +547,7 @@ ALL_PROGRAMS += ccan/ccan/cdump/tools/cdump-enumstr
 # Can't add to ALL_OBJS, as that makes a circular dep.
 ccan/ccan/cdump/tools/cdump-enumstr.o: $(CCAN_HEADERS) Makefile
 
-version_gen.h: FORCE
+version_gen.h: $(FORCE)
 	@(echo "#define VERSION \"$(VERSION)\"" && echo "#define BUILD_FEATURES \"$(FEATURES)\"") > $@.new
 	@if cmp $@.new $@ >/dev/null 2>&1; then rm -f $@.new; else mv $@.new $@; $(ECHO) Version updated; fi
 
@@ -598,7 +619,16 @@ clean: obsclean
 	find . -name '*gcno' -delete
 	find . -name '*.nccout' -delete
 
-update-mocks: $(ALL_GEN_HEADERS)
+# These must both be enabled for update-mocks
+ifeq ($(DEVELOPER)$(EXPERIMENTAL_FEATURES),11)
+update-mocks: $(ALL_TEST_PROGRAMS:%=update-mocks/%.c)
+else
+update-mocks:
+	@echo Need DEVELOPER=1 and EXPERIMENTAL_FEATURES=1 to regenerate mocks >&2; exit 1
+endif
+
+$(ALL_TEST_PROGRAMS:%=update-mocks/%.c): $(ALL_GEN_HEADERS) $(EXTERNAL_LIBS) $(CCAN_OBJS) ccan/ccan/cdump/tools/cdump-enumstr config.vars
+
 update-mocks/%: %
 	@MAKE=$(MAKE) tools/update-mocks.sh "$*" $(SUPPRESS_OUTPUT)
 

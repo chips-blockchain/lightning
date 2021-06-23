@@ -102,6 +102,11 @@ example:
     "init": "0E000000",
     "invoice": "00AD0000"
   },
+  "notifications": [
+    {
+	  "method": "mycustomnotification"
+	}
+  ],
   "dynamic": true
 }
 ```
@@ -146,6 +151,13 @@ featurebits is reserved for standardize features, so please pick random, high
 position bits for experiments. If you'd like to standardize your extension
 please reach out to the [specification repository][spec] to get a featurebit
 assigned.
+
+The `notifications` array allows plugins to announce which custom
+notifications they intend to send to `lightningd`. These custom
+notifications can then be subscribed to by other plugins, allowing
+them to communicate with each other via the existing publish-subscribe
+mechanism and react to events that happen in other plugins, or collect
+information based on the notification topics.
 
 Plugins are free to register any `name` for their `rpcmethod` as long
 as the name was not previously registered. This includes both built-in
@@ -205,6 +217,60 @@ Here's an example option set, as sent in response to `getmanifest`
     }
   ],
 ```
+
+#### Custom notifications
+
+The plugins may emit custom notifications for topics they have
+announced during startup. The list of notification topics declared
+during startup must include all topics that may be emitted, in order
+to verify that all topics plugins subscribe to are also emitted by
+some other plugin, and warn if a plugin subscribes to a non-existent
+topic. In case a plugin emits notifications it has not announced the
+notification will be ignored and not forwarded to subscribers.
+
+When forwarding a custom notification `lightningd` will wrap the
+payload of the notification in an object that contains metadata about
+the notification. The following is an example of this
+transformation. The first listing is the original notification emitted
+by the `sender` plugin, while the second is the the notification as
+received by the `receiver` plugin (both listings show the full
+[JSON-RPC][jsonrpc-spec] notification to illustrate the wrapping).
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "mycustomnotification",
+  "params": {
+    "key": "value",
+	"message": "Hello fellow plugin!"
+  }
+}
+```
+
+is delivered as
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "mycustomnotification",
+  "params": {
+    "origin": "sender",
+    "payload": {
+      "key": "value",
+      "message": "Hello fellow plugin!"
+    }
+  }
+}
+
+```
+
+The notification topic (`method` in the JSON-RPC message) must not
+match one of the internal events in order to prevent breaking
+subscribers that expect the existing notification format. Multiple
+plugins are allowed to emit notifications for the same topics,
+allowing things like metric aggregators where the aggregator
+subscribes to a common topic and other plugins publish metrics as
+notifications.
 
 ### The `init` method
 
@@ -343,7 +409,7 @@ if the funding transaction has been included into a block.
 
 A notification to indicate that a channel open attempt has been unsuccessful.
 Useful for cleaning up state for a v2 channel open attempt. See
-`tests/plugins/df_accepter.py` for an example of how to use this.
+`plugins/funder.c` for an example of how to use this.
 
 ```json
 {
@@ -1034,6 +1100,7 @@ the v2 protocol, and it has passed basic sanity checks:
     "max_accepted_htlcs": 483,
     "channel_flags": 1
     "locktime": 2453,
+    "channel_max_msat": "16777215000msat"
   }
 }
 ```
@@ -1055,7 +1122,7 @@ Note that, like `openchannel_init` RPC call, the `our_funding_msat` amount
 must NOT be accounted for in any supplied output. Change, however, should be
 included and should use the `funding_feerate_per_kw` to calculate.
 
-See `tests/plugins/df_accepter.py` for an example of how to use this hook
+See `plugins/funder.c` for an example of how to use this hook
 to contribute funds to a channel open.
 
 e.g.
@@ -1104,7 +1171,7 @@ negotation will end and commitment transactions will be exchanged.
 }
 ```
 
-See `tests/plugins/df_accepter.py` for an example of how to use this hook
+See `plugins/funder.c` for an example of how to use this hook
 to continue a v2 channel open.
 
 
@@ -1138,7 +1205,7 @@ broadcast.
 }
 ```
 
-See `tests/plugins/df_accepter.py` for an example of how to use this hook
+See `plugins/funder.c` for an example of how to use this hook
 to sign a funding transaction.
 
 
@@ -1156,7 +1223,8 @@ requests an RBF for a channel funding transaction.
     "funding_feerate_per_kw": 7500,
     "feerate_our_max": 10000,
     "feerate_our_min": 253,
-    "locktime": 2453,
+    "channel_max_msat": "16777215000msat",
+    "locktime": 2453
   }
 }
 ```

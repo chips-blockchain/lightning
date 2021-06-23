@@ -4,6 +4,9 @@ PLUGIN_PAY_OBJS := $(PLUGIN_PAY_SRC:.c=.o)
 PLUGIN_AUTOCLEAN_SRC := plugins/autoclean.c
 PLUGIN_AUTOCLEAN_OBJS := $(PLUGIN_AUTOCLEAN_SRC:.c=.o)
 
+PLUGIN_TOPOLOGY_SRC := plugins/topology.c
+PLUGIN_TOPOLOGY_OBJS := $(PLUGIN_TOPOLOGY_SRC:.c=.o)
+
 PLUGIN_TXPREPARE_SRC := plugins/txprepare.c
 PLUGIN_TXPREPARE_OBJS := $(PLUGIN_TXPREPARE_SRC:.c=.o)
 
@@ -43,10 +46,19 @@ PLUGIN_SPENDER_HEADER :=			\
 	plugins/spender/openchannel.h
 PLUGIN_SPENDER_OBJS := $(PLUGIN_SPENDER_SRC:.c=.o)
 
+PLUGIN_FUNDER_SRC :=				\
+	plugins/funder.c			\
+	plugins/funder_policy.c
+PLUGIN_FUNDER_HEADER :=				\
+	plugins/funder_policy.h
+PLUGIN_FUNDER_OBJS := $(PLUGIN_FUNDER_SRC:.c=.o)
+
 PLUGIN_ALL_SRC :=				\
 	$(PLUGIN_AUTOCLEAN_SRC)			\
 	$(PLUGIN_BCLI_SRC)			\
 	$(PLUGIN_FETCHINVOICE_SRC)		\
+	$(PLUGIN_FUNDER_SRC)			\
+	$(PLUGIN_TOPOLOGY_SRC)			\
 	$(PLUGIN_KEYSEND_SRC)			\
 	$(PLUGIN_TXPREPARE_SRC)			\
 	$(PLUGIN_LIB_SRC)			\
@@ -57,6 +69,7 @@ PLUGIN_ALL_SRC :=				\
 
 PLUGIN_ALL_HEADER :=				\
 	$(PLUGIN_LIB_HEADER)			\
+	$(PLUGIN_FUNDER_HEADER)			\
 	$(PLUGIN_PAY_LIB_HEADER)		\
 	$(PLUGIN_OFFERS_HEADER)			\
 	$(PLUGIN_SPENDER_HEADER)
@@ -66,6 +79,8 @@ PLUGINS :=					\
 	plugins/autoclean			\
 	plugins/bcli				\
 	plugins/fetchinvoice			\
+	plugins/funder				\
+	plugins/topology			\
 	plugins/keysend				\
 	plugins/offers				\
 	plugins/pay				\
@@ -106,6 +121,7 @@ PLUGIN_COMMON_OBJS :=				\
 	common/memleak.o			\
 	common/node_id.o			\
 	common/param.o				\
+	common/psbt_open.o			\
 	common/pseudorand.o			\
 	common/random_select.o			\
 	common/setup.o				\
@@ -124,6 +140,10 @@ $(PLUGIN_PAY_OBJS): $(PLUGIN_PAY_LIB_HEADER)
 
 plugins/autoclean: bitcoin/chainparams.o $(PLUGIN_AUTOCLEAN_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
 
+# Topology wants to decode node_announcement, and peer_wiregen which
+# pulls in some of bitcoin/.
+plugins/topology: common/route.o common/dijkstra.o common/gossmap.o common/fp16.o bitcoin/chainparams.o wire/peer$(EXP)_wiregen.o bitcoin/block.o bitcoin/preimage.o  $(PLUGIN_TOPOLOGY_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
+
 plugins/txprepare: bitcoin/chainparams.o $(PLUGIN_TXPREPARE_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
 
 plugins/bcli: bitcoin/chainparams.o $(PLUGIN_BCLI_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
@@ -137,9 +157,13 @@ plugins/offers: bitcoin/chainparams.o $(PLUGIN_OFFERS_OBJS) $(PLUGIN_LIB_OBJS) $
 
 plugins/fetchinvoice: bitcoin/chainparams.o $(PLUGIN_FETCHINVOICE_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) common/bolt12.o common/bolt12_merkle.o common/iso4217.o $(WIRE_OBJS) bitcoin/block.o common/channel_id.o bitcoin/preimage.o $(JSMN_OBJS) $(CCAN_OBJS) common/gossmap.o common/fp16.o common/dijkstra.o common/route.o common/blindedpath.o common/hmac.o common/blinding.o
 
+plugins/funder: bitcoin/chainparams.o bitcoin/psbt.o common/psbt_open.o $(PLUGIN_FUNDER_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS) $(CCAN_OBJS)
+
 $(PLUGIN_ALL_OBJS): $(PLUGIN_LIB_HEADER)
 
 # Generated from PLUGINS definition in plugins/Makefile
 ALL_C_HEADERS += plugins/list_of_builtin_plugins_gen.h
 plugins/list_of_builtin_plugins_gen.h: plugins/Makefile Makefile
 	@$(call VERBOSE,GEN $@,echo "static const char *list_of_builtin_plugins[] = { $(foreach d,$(notdir $(PLUGINS)),\"$d\",) NULL };" > $@)
+
+include plugins/test/Makefile

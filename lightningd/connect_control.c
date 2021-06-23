@@ -2,6 +2,7 @@
 #include <ccan/fdpass/fdpass.h>
 #include <ccan/list/list.h>
 #include <ccan/tal/str/str.h>
+#include <common/configdir.h>
 #include <common/errcode.h>
 #include <common/features.h>
 #include <common/json_command.h>
@@ -166,7 +167,7 @@ static struct command_result *json_connect(struct command *cmd,
 		if (!parse_wireaddr_internal(name, addr, *port, false,
 					     !cmd->ld->use_proxy_always
 					     && !cmd->ld->pure_tor_setup,
-					     true,
+					     true, deprecated_apis,
 					     &err_msg)) {
 			return command_fail(cmd, LIGHTNINGD,
 					    "Host %s:%u not valid: %s",
@@ -297,11 +298,9 @@ static void peer_please_disconnect(struct lightningd *ld, const u8 *msg)
 		channel_cleanup_commands(c, "Reconnected");
 		channel_fail_reconnect(c, "Reconnected");
 	}
-	else {
-		/* v2 has unsaved channels, not uncommitted_chans */
-		c = unsaved_channel_by_id(ld, &id);
-		if (c)
-			channel_close_conn(c, "Reconnected");
+	else if ((c = unsaved_channel_by_id(ld, &id))) {
+		log_info(c->log, "Killing opening daemon: Reconnected");
+		channel_unsaved_close_conn(c, "Reconnected");
 	}
 }
 
@@ -316,6 +315,7 @@ static unsigned connectd_msg(struct subd *connectd, const u8 *msg, const int *fd
 	case WIRE_CONNECTD_CONNECT_TO_PEER:
 	case WIRE_CONNECTD_PEER_DISCONNECTED:
 	case WIRE_CONNECTD_DEV_MEMLEAK:
+	case WIRE_CONNECTD_PEER_FINAL_MSG:
 	/* This is a reply, so never gets through to here. */
 	case WIRE_CONNECTD_INIT_REPLY:
 	case WIRE_CONNECTD_ACTIVATE_REPLY:

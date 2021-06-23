@@ -4,7 +4,7 @@ lightning-createonion -- Low-level command to create a custom onion
 SYNOPSIS
 --------
 
-**createonion** *hops* *assocdata* \[*session_key*\]
+**createonion** *hops* *assocdata* \[*session_key*\] \[*onion_size*\]
 
 DESCRIPTION
 -----------
@@ -68,10 +68,10 @@ which the above *hops* parameter was generated:
 
  - Notice that the payload in the *hops* parameter is the hex-encoded version
    of the parameters in the `getroute` response.
- - The payloads are shifted left by one, i.e., payload 0 in `createonion`
-   corresponds to payload 1 from `getroute`.
+ - Except for the pubkey, the values are shifted left by one, i.e., the 1st
+   payload in `createonion` corresponds to the 2nd set of values from `getroute`.
  - The final payload is a copy of the last payload sans `channel`
- 
+
 These rules are directly derived from the onion construction. Please refer
 [BOLT 04][bolt04] for details and rationale.
 
@@ -85,12 +85,25 @@ should only be used for testing or if a specific shared secret is
 important. If not specified it will be securely generated internally, and the
 shared secrets will be returned.
 
+The optional *onion_size* parameter specifies a size different from the default
+payment onion (1300 bytes). May be used for custom protocols like trampoline
+routing.
+
 RETURN VALUE
 ------------
 
-On success, an object containing the onion and the shared secrets will be
-returned. Otherwise an error will be reported. The following example is the
-result of calling *createonion* with the above hops parameter:
+[comment]: # (GENERATE-FROM-SCHEMA-START)
+On success, an object is returned, containing:
+- **onion** (hex): the onion packet (*onion_size* bytes)
+- **shared_secrets** (array of hexs): one shared secret for each node in the *hops* parameter:
+  - the shared secret with this hop (always 64 characters)
+[comment]: # (GENERATE-FROM-SCHEMA-END)
+
+EXAMPLE
+-------
+
+The following example is the result of calling *createonion* with the
+above hops parameter:
 
 ```json
 {
@@ -122,4 +135,4 @@ RESOURCES
 Main web site: <https://github.com/ElementsProject/lightning>
 
 [bolt04]: https://github.com/lightningnetwork/lightning-rfc/blob/master/04-onion-routing.md
-
+[comment]: # ( SHA256STAMP:a5a64325f4232f27bccbbe1c9fc62bfb602ba60c81f46a1ef2df25b06dac807e)

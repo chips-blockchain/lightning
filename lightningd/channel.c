@@ -159,9 +159,10 @@ new_inflight(struct channel *channel,
 	     struct amount_sat total_funds,
 	     struct amount_sat our_funds,
 	     struct wally_psbt *psbt STEALS,
-	     struct bitcoin_tx *last_tx STEALS,
+	     struct bitcoin_tx *last_tx,
 	     const struct bitcoin_signature last_sig)
 {
+	struct wally_psbt *last_tx_psbt_clone;
 	struct channel_inflight *inflight
 		= tal(channel, struct channel_inflight);
 	struct funding_info *funding
@@ -177,7 +178,10 @@ new_inflight(struct channel *channel,
 	inflight->channel = channel;
 	inflight->remote_tx_sigs = false;
 	inflight->funding_psbt = tal_steal(inflight, psbt);
-	inflight->last_tx = tal_steal(inflight, last_tx);
+
+	/* Make a 'clone' of this tx */
+	last_tx_psbt_clone = clone_psbt(inflight, last_tx->psbt);
+	inflight->last_tx = bitcoin_tx_with_psbt(inflight, last_tx_psbt_clone);
 	inflight->last_sig = last_sig;
 	inflight->tx_broadcast = false;
 
@@ -214,7 +218,6 @@ struct channel *new_unsaved_channel(struct peer *peer,
 	/* A zero value database id means it's not saved in the database yet */
 	channel->dbid = 0;
 	channel->error = NULL;
-	channel->htlc_timeout = NULL;
 	channel->openchannel_signed_cmd = NULL;
 	channel->state = DUALOPEND_OPEN_INIT;
 	channel->owner = NULL;
@@ -260,7 +263,8 @@ struct channel *new_unsaved_channel(struct peer *peer,
 	 * | Use v2 of channel open, enables dual funding
 	 * | IN9
 	 * | `option_anchor_outputs`    */
-	channel->option_static_remotekey = true;
+	channel->static_remotekey_start[LOCAL]
+		= channel->static_remotekey_start[REMOTE] = 0;
 	channel->option_anchor_outputs = true;
 	channel->future_per_commitment_point = NULL;
 
@@ -331,7 +335,8 @@ struct channel *new_channel(struct peer *peer, u64 dbid,
 			    u32 feerate_base,
 			    u32 feerate_ppm,
 			    const u8 *remote_upfront_shutdown_script,
-			    bool option_static_remotekey,
+			    u64 local_static_remotekey_start,
+			    u64 remote_static_remotekey_start,
 			    bool option_anchor_outputs,
 			    enum side closer,
 			    enum state_change reason,
@@ -345,7 +350,6 @@ struct channel *new_channel(struct peer *peer, u64 dbid,
 	channel->dbid = dbid;
 	channel->unsaved_dbid = 0;
 	channel->error = NULL;
-	channel->htlc_timeout = NULL;
 	channel->open_attempt = NULL;
 	channel->openchannel_signed_cmd = NULL;
 	if (their_shachain)
@@ -421,7 +425,8 @@ struct channel *new_channel(struct peer *peer, u64 dbid,
 	channel->feerate_ppm = feerate_ppm;
 	channel->remote_upfront_shutdown_script
 		= tal_steal(channel, remote_upfront_shutdown_script);
-	channel->option_static_remotekey = option_static_remotekey;
+	channel->static_remotekey_start[LOCAL] = local_static_remotekey_start;
+	channel->static_remotekey_start[REMOTE] = remote_static_remotekey_start;
 	channel->option_anchor_outputs = option_anchor_outputs;
 	channel->forgets = tal_arr(channel, struct command *, 0);
 
@@ -726,15 +731,9 @@ void channel_fail_forget(struct channel *channel, const char *fmt, ...)
 struct channel_inflight *
 channel_current_inflight(const struct channel *channel)
 {
-	struct channel_inflight *inflight;
 	/* The last inflight should always be the one in progress */
-	inflight = list_tail(&channel->inflights,
-			     struct channel_inflight,
-			     list);
-	if (inflight)
-		assert(bitcoin_txid_eq(&channel->funding_txid,
-				       &inflight->funding->txid));
-	return inflight;
+	return list_tail(&channel->inflights,
+			 struct channel_inflight, list);
 }
 
 u32 channel_last_funding_feerate(const struct channel *channel)

@@ -22,7 +22,7 @@ static struct command_result *json_helloworld(struct command *cmd,
 	if (!name)
 		name = name_option ? name_option : tal_strdup(tmpctx, "world");
 
-	return command_success_str(cmd, tal_fmt(tmpctx, "hello %s", name));
+	return command_success(cmd, json_out_obj(cmd, "hello", name));
 }
 
 static struct command_result *
@@ -146,6 +146,7 @@ int main(int argc, char *argv[])
 	plugin_main(argv, init, PLUGIN_RESTARTABLE, true, NULL,
 		    commands, ARRAY_SIZE(commands),
 	            notifs, ARRAY_SIZE(notifs), hooks, ARRAY_SIZE(hooks),
+		    NULL, 0,  /* Notification topics we publish */
 		    plugin_option("name",
 				  "string",
 				  "Who to say hello to.",

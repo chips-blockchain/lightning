@@ -14,12 +14,12 @@ WIRE_TEST_COMMON_OBJS :=		\
 	common/setup.o			\
 	common/utils.o
 
-update-mocks: $(WIRE_TEST_SRC:%=update-mocks/%)
-
 # run-tlvstream.c needs to reach into bitcoin/pubkey for SUPERVERBOSE
 $(WIRE_TEST_PROGRAMS): $(WIRE_TEST_COMMON_OBJS) $(filter-out bitcoin/pubkey.o,$(BITCOIN_OBJS))
 
-$(WIRE_TEST_OBJS): $(WIRE_HEADERS) $(WIRE_SRC) $(WIRE_PRINT_SRC)
+# We put a dependency on non-exp sources here, so they get built even if
+# we're EXPERIMENTAL_FEATURES.
+$(WIRE_TEST_OBJS): $(WIRE_HEADERS) $(WIRE_SRC) $(WIRE_PRINT_SRC) $(WIRE_NONEXP_SRC)
 
 wire-tests: $(WIRE_TEST_PROGRAMS:%=unittest/%)
 

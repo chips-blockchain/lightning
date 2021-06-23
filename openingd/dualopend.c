@@ -1112,13 +1112,15 @@ static u8 *handle_funding_locked(struct state *state, u8 *msg)
 			      tal_hex(msg, msg));
 	}
 
-	state->funding_locked[REMOTE] = true;
-	billboard_update(state);
-
 	/* We save when the peer locks, so we do the right
 	 * thing on reconnects */
-	msg = towire_dualopend_peer_locked(NULL, &remote_per_commit);
-	wire_sync_write(REQ_FD, take(msg));
+	if (!state->funding_locked[REMOTE]) {
+		msg = towire_dualopend_peer_locked(NULL, &remote_per_commit);
+		wire_sync_write(REQ_FD, take(msg));
+	}
+
+	state->funding_locked[REMOTE] = true;
+	billboard_update(state);
 
 	if (state->funding_locked[LOCAL])
 		return towire_dualopend_channel_locked(state, state->pps);
@@ -1271,6 +1273,9 @@ static u8 *opening_negotiate_msg(const tal_t *ctx, struct state *state)
 		case WIRE_WARNING:
 		case WIRE_PING:
 		case WIRE_PONG:
+#if EXPERIMENTAL_FEATURES
+		case WIRE_STFU:
+#endif
 			break;
 		}
 
@@ -1612,6 +1617,9 @@ static bool run_tx_interactive(struct state *state,
 		case WIRE_REPLY_SHORT_CHANNEL_IDS_END:
 		case WIRE_PING:
 		case WIRE_PONG:
+#if EXPERIMENTAL_FEATURES
+		case WIRE_STFU:
+#endif
 			open_err_warn(state, "Unexpected wire message %s",
 				      tal_hex(tmpctx, msg));
 			return false;
@@ -1896,8 +1904,8 @@ static void accepter_start(struct state *state, const u8 *oc2_msg)
 {
 	struct bitcoin_blkid chain_hash;
 	struct tlv_opening_tlvs *open_tlv;
+	struct channel_id cid, full_cid;
 	char *err_reason;
-	struct channel_id tmp_chan_id;
 	u8 *msg;
 	struct amount_sat total;
 	enum dualopend_wire msg_type;
@@ -1907,7 +1915,7 @@ static void accepter_start(struct state *state, const u8 *oc2_msg)
 	open_tlv = tlv_opening_tlvs_new(tmpctx);
 
 	if (!fromwire_open_channel2(oc2_msg, &chain_hash,
-				    &state->channel_id, /* Temporary! */
+				    &cid,
 				    &tx_state->feerate_per_kw_funding,
 				    &state->feerate_per_kw_commitment,
 				    &tx_state->opener_funding,
@@ -1939,21 +1947,15 @@ static void accepter_start(struct state *state, const u8 *oc2_msg)
 	 * `open_channel2`), a temporary `channel_id` should be found
 	 * by using a zeroed out basepoint for the unknown peer.
 	 */
-	derive_tmp_channel_id(&tmp_chan_id,
+	derive_tmp_channel_id(&state->channel_id, /* Temporary! */
 			      &state->their_points.revocation);
-	if (!channel_id_eq(&state->channel_id, &tmp_chan_id))
+	if (!channel_id_eq(&state->channel_id, &cid))
 		negotiation_failed(state, "open_channel2 channel_id incorrect."
 				   " Expected %s, received %s",
 				   type_to_string(tmpctx, struct channel_id,
-						  &tmp_chan_id),
+						  &state->channel_id),
 				   type_to_string(tmpctx, struct channel_id,
-						  &state->channel_id));
-
-	/* Everything's ok. Let's figure out the actual channel_id now */
-	derive_channel_id_v2(&state->channel_id,
-			     &state->our_points.revocation,
-			     &state->their_points.revocation);
-
+						  &cid));
 
 	/* Save feerate on the state as well */
 	state->feerate_per_kw_funding = tx_state->feerate_per_kw_funding;
@@ -1990,8 +1992,12 @@ static void accepter_start(struct state *state, const u8 *oc2_msg)
 		return;
 	}
 
+	/* We send the 'real' channel id over to lightningd */
+	derive_channel_id_v2(&full_cid,
+			     &state->our_points.revocation,
+			     &state->their_points.revocation);
 	msg = towire_dualopend_got_offer(NULL,
-					 &state->channel_id,
+					 &full_cid,
 					 tx_state->opener_funding,
 					 tx_state->remoteconf.dust_limit,
 					 tx_state->remoteconf.max_htlc_value_in_flight,
@@ -2010,7 +2016,6 @@ static void accepter_start(struct state *state, const u8 *oc2_msg)
 	if ((msg_type = fromwire_peektype(msg)) == WIRE_DUALOPEND_FAIL) {
 		if (!fromwire_dualopend_fail(msg, msg, &err_reason))
 			master_badmsg(msg_type, msg);
-
 		open_err_warn(state, "%s", err_reason);
 		return;
 	}
@@ -2024,6 +2029,9 @@ static void accepter_start(struct state *state, const u8 *oc2_msg)
 	if (!tx_state->psbt)
 		tx_state->psbt = create_psbt(tx_state, 0, 0,
 					     tx_state->tx_locktime);
+	else
+		/* Locktimes must match! */
+		tx_state->psbt->tx->locktime = tx_state->tx_locktime;
 
 	/* Check that total funding doesn't overflow */
 	if (!amount_sat_add(&total, tx_state->opener_funding,
@@ -2104,6 +2112,11 @@ static void accepter_start(struct state *state, const u8 *oc2_msg)
 				     &state->our_points.htlc,
 				     &state->first_per_commitment_point[LOCAL],
 				     a_tlv);
+
+	/* Everything's ok. Let's figure out the actual channel_id now */
+	derive_channel_id_v2(&state->channel_id,
+			     &state->our_points.revocation,
+			     &state->their_points.revocation);
 
 	sync_crypto_write(state->pps, msg);
 	peer_billboard(false, "channel open: accept sent, waiting for reply");
@@ -2479,6 +2492,23 @@ static void opener_start(struct state *state, u8 *msg)
 		open_err_fatal(state,  "Parsing accept_channel2 %s",
 			       tal_hex(msg, msg));
 
+	if (!channel_id_eq(&cid, &state->channel_id)) {
+		struct channel_id future_chan_id;
+		/* FIXME: v0.10.0 actually replied with the complete channel id here,
+		 * so we need to accept it for now */
+		derive_channel_id_v2(&future_chan_id,
+				     &state->our_points.revocation,
+				     &state->their_points.revocation);
+		if (!channel_id_eq(&cid, &future_chan_id)) {
+			peer_failed_err(state->pps, &cid,
+					"accept_channel2 ids don't match: "
+					"expected %s, got %s",
+					type_to_string(msg, struct channel_id,
+						       &state->channel_id),
+					type_to_string(msg, struct channel_id, &cid));
+		}
+	}
+
 	if (a_tlv->option_upfront_shutdown_script) {
 		state->upfront_shutdown_script[REMOTE]
 			= tal_steal(state,
@@ -2491,14 +2521,6 @@ static void opener_start(struct state *state, u8 *msg)
 	derive_channel_id_v2(&state->channel_id,
 			     &state->our_points.revocation,
 			     &state->their_points.revocation);
-
-	if (!channel_id_eq(&cid, &state->channel_id))
-		peer_failed_err(state->pps, &cid,
-				"accept_channel2 ids don't match: "
-				"expected %s, got %s",
-				type_to_string(msg, struct channel_id,
-					       &state->channel_id),
-				type_to_string(msg, struct channel_id, &cid));
 
 	/* Check that total funding doesn't overflow */
 	if (!amount_sat_add(&total, tx_state->opener_funding,
@@ -3142,6 +3164,9 @@ static void do_reconnect_dance(struct state *state)
 		last_remote_per_commit_secret;
 	struct pubkey remote_current_per_commit_point;
 	struct tx_state *tx_state = state->tx_state;
+#if EXPERIMENTAL_FEATURES
+	struct tlv_channel_reestablish_tlvs *tlvs = tlv_channel_reestablish_tlvs_new(tmpctx);
+#endif
 
 	/* BOLT #2:
 	 *     - if `next_revocation_number` equals 0:
@@ -3155,7 +3180,11 @@ static void do_reconnect_dance(struct state *state)
 	msg = towire_channel_reestablish
 		(NULL, &state->channel_id, 1, 0,
 		 &last_remote_per_commit_secret,
-		 &state->first_per_commitment_point[LOCAL]);
+		 &state->first_per_commitment_point[LOCAL]
+#if EXPERIMENTAL_FEATURES
+		 , tlvs
+#endif
+			);
 	sync_crypto_write(state->pps, take(msg));
 
 	peer_billboard(false, "Sent reestablish, waiting for theirs");
@@ -3178,7 +3207,11 @@ static void do_reconnect_dance(struct state *state)
 			 &next_commitment_number,
 			 &next_revocation_number,
 			 &last_local_per_commit_secret,
-			 &remote_current_per_commit_point))
+			 &remote_current_per_commit_point
+#if EXPERIMENTAL_FEATURES
+			 , tlvs
+#endif
+				))
 		open_err_fatal(state, "Bad reestablish msg: %s %s",
 			       peer_wire_name(fromwire_peektype(msg)),
 			       tal_hex(msg, msg));
@@ -3227,24 +3260,6 @@ static void do_reconnect_dance(struct state *state)
 	}
 
 	peer_billboard(true, "Reconnected, and reestablished.");
-}
-
-/*~ Is this message of type `error` with the special zero-id
- * "fail-everything"?  If lightningd asked us to send such a thing, we're
- * done. */
-static void fail_if_all_error(const u8 *inner)
-{
-	struct channel_id channel_id;
-	u8 *data;
-
-	if (!fromwire_error(tmpctx, inner, &channel_id, &data)
-	    || !channel_id_is_all(&channel_id)) {
-		return;
-	}
-
-	status_info("Master said send err: %s",
-		    sanitize_error(tmpctx, inner, NULL));
-	exit(0);
 }
 
 /* Standard lightningd-fd-is-ready-to-read demux code.  Again, we could hang
@@ -3386,6 +3401,9 @@ static u8 *handle_peer_in(struct state *state)
 	case WIRE_WARNING:
 	case WIRE_PING:
 	case WIRE_PONG:
+#if EXPERIMENTAL_FEATURES
+	case WIRE_STFU:
+#endif
 		break;
 	}
 
@@ -3431,7 +3449,7 @@ int main(int argc, char *argv[])
 	struct secret *none;
 	struct fee_states *fee_states;
 	enum side opener;
-	u8 *msg, *inner;
+	u8 *msg;
 	struct amount_sat total_funding;
 	struct amount_msat our_msat;
 
@@ -3456,8 +3474,7 @@ int main(int argc, char *argv[])
 				    &state->pps,
 				    &state->our_points,
 				    &state->our_funding_pubkey,
-				    &state->minimum_depth,
-				    &inner)) {
+				    &state->minimum_depth)) {
 		/*~ Initially we're not associated with a channel, but
 		 * handle_peer_gossip_or_error compares this. */
 		memset(&state->channel_id, 0, sizeof(state->channel_id));
@@ -3509,8 +3526,7 @@ int main(int argc, char *argv[])
 					     &state->upfront_shutdown_script[REMOTE],
 					     &state->tx_state->remote_funding_sigs_rcvd,
 					     &fee_states,
-					     &state->channel_flags,
-					     &inner)) {
+					     &state->channel_flags)) {
 
 		/*~ We only reconnect on channels that the
 		 * saved the the database (exchanged commitment sigs) */
@@ -3545,14 +3561,6 @@ int main(int argc, char *argv[])
 
 	/* 3 == peer, 4 == gossipd, 5 = gossip_store, 6 = hsmd */
 	per_peer_state_set_fds(state->pps, 3, 4, 5);
-
-	/*~ If lightningd wanted us to send a msg, do so before we waste time
-	 * doing work.  If it's a global error, we'll close immediately. */
-	if (inner != NULL) {
-		sync_crypto_write(state->pps, inner);
-		fail_if_all_error(inner);
-		tal_free(inner);
-	}
 
 	/*~ We need an initial per-commitment point whether we're funding or
 	 * they are, and lightningd has reserved a unique dbid for us already,

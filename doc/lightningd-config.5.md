@@ -157,6 +157,10 @@ with multiple daemons.
 Log to this file instead of stdout. Sending lightningd(8) SIGHUP will
 cause it to reopen this file (useful for log rotation).
 
+ **log-timetamps**=*BOOL*
+Set this to false to turn off timestamp prefixes (they will still appear
+in crash log files).
+
  **rpc-file**=*PATH*
 Set JSON-RPC socket (or /dev/tty), such as for lightning-cli(1).
 
@@ -409,9 +413,6 @@ all DNS lookups, to avoid leaking information.
 
  **disable-dns**
 Disable the DNS bootstrapping mechanism to find a node by its node ID.
-
- **enable-autotor-v2-mode**
-Try to get a v2 onion address from the Tor service call, default is v3.
 
  **tor-service-password**=*PASSWORD*
 Set a Tor control password, which may be needed for *autotor:* to

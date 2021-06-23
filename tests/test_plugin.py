@@ -9,7 +9,8 @@ from utils import (
     DEVELOPER, only_one, sync_blockheight, TIMEOUT, wait_for, TEST_NETWORK,
     DEPRECATED_APIS, expected_peer_features, expected_node_features,
     expected_channel_features, account_balance,
-    check_coin_moves, first_channel_id, check_coin_moves_idx, EXPERIMENTAL_FEATURES
+    check_coin_moves, first_channel_id, check_coin_moves_idx,
+    EXPERIMENTAL_FEATURES, EXPERIMENTAL_DUAL_FUND
 )
 
 import ast
@@ -575,6 +576,8 @@ def test_invoice_payment_hook_hold(node_factory):
     l1.rpc.pay(inv1['bolt11'])
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_openchannel_hook(node_factory, bitcoind):
     """ l2 uses the reject_odd_funding_amounts plugin to reject some openings.
     """
@@ -599,14 +602,14 @@ def test_openchannel_hook(node_factory, bitcoind):
     if l2.config('experimental-dual-fund'):
         # openchannel2 var checks
         expected.update({
-            'commitment_feerate_per_kw': '750',
+            'channel_id': '.*',
+            'commitment_feerate_per_kw': '7500',
+            'funding_feerate_per_kw': '7500',
             'feerate_our_max': '150000',
             'feerate_our_min': '1875',
-            'funding_feerate_best': '7500',
-            'funding_feerate_max': '150000',
-            'funding_feerate_min': '1875',
             'locktime': '.*',
             'their_funding': '100000000msat',
+            'channel_max_msat': '16777215000msat',
         })
     else:
         expected.update({
@@ -631,6 +634,8 @@ def test_openchannel_hook(node_factory, bitcoind):
         l1.rpc.fundchannel(l2.info['id'], 100001)
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_openchannel_hook_error_handling(node_factory, bitcoind):
     """ l2 uses a plugin that should fatal() crash the node.
 
@@ -653,6 +658,8 @@ def test_openchannel_hook_error_handling(node_factory, bitcoind):
     assert l2.daemon.is_in_log("BROKEN.*Plugin rejected openchannel[2]? but also set close_to")
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_openchannel_hook_chaining(node_factory, bitcoind):
     """ l2 uses a set of plugin that all use the openchannel_hook.
 
@@ -672,7 +679,7 @@ def test_openchannel_hook_chaining(node_factory, bitcoind):
     hook_msg = "openchannel2? hook rejects and says '"
     # 100005sat fundchannel should fail fatal() for l2
     # because hook_accepter.py rejects on that amount 'for a reason'
-    with pytest.raises(RpcError, match=r'They sent error channel'):
+    with pytest.raises(RpcError, match=r'reject for a reason'):
         l1.rpc.fundchannel(l2.info['id'], 100005)
 
     assert l2.daemon.wait_for_log(hook_msg + "reject for a reason")
@@ -683,11 +690,14 @@ def test_openchannel_hook_chaining(node_factory, bitcoind):
 
     # 100000sat is good for hook_accepter, so it should fail 'on principle'
     # at third hook openchannel_reject.py
-    with pytest.raises(RpcError, match=r'They sent error channel'):
+    with pytest.raises(RpcError, match=r'reject on principle'):
+        l1.rpc.connect(l2.info['id'], 'localhost', l2.port)
         l1.rpc.fundchannel(l2.info['id'], 100000)
     assert l2.daemon.wait_for_log(hook_msg + "reject on principle")
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_channel_state_changed_bilateral(node_factory, bitcoind):
     """ We open and close a channel and check notifications both sides.
 
@@ -826,6 +836,8 @@ def test_channel_state_changed_bilateral(node_factory, bitcoind):
     assert(event2['message'] == "Onchain init reply")
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_channel_state_changed_unilateral(node_factory, bitcoind):
     """ We open, disconnect, force-close a channel and check for notifications.
 
@@ -835,6 +847,9 @@ def test_channel_state_changed_unilateral(node_factory, bitcoind):
     # such errors a soft because LND.
     opts = {"plugin": os.path.join(os.getcwd(), "tests/plugins/misc_notifications.py"),
             "allow_warning": True}
+    if EXPERIMENTAL_DUAL_FUND:
+        opts['may_reconnect'] = True
+
     l1, l2 = node_factory.line_graph(2, opts=opts)
 
     l1_id = l1.rpc.getinfo()["id"]
@@ -890,6 +905,9 @@ def test_channel_state_changed_unilateral(node_factory, bitcoind):
     wait_for(lambda: len(l1.rpc.listpeers()['peers']) == 1)
     # check 'closer' on l2 while the peer is not yet forgotten
     assert(l2.rpc.listpeers()['peers'][0]['channels'][0]['closer'] == 'local')
+    if EXPERIMENTAL_DUAL_FUND:
+        l1.daemon.wait_for_log(r'Peer has reconnected, state')
+        l2.daemon.wait_for_log(r'Peer has reconnected, state')
 
     # settle the channel closure
     bitcoind.generate_block(100)
@@ -926,6 +944,8 @@ def test_channel_state_changed_unilateral(node_factory, bitcoind):
     assert(event1['message'] == "Onchain init reply")
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_channel_state_change_history(node_factory, bitcoind):
     """ We open and close a channel and check for state_canges entries.
 
@@ -965,7 +985,7 @@ def test_channel_state_change_history(node_factory, bitcoind):
         assert(history[3]['message'] == "Closing complete")
 
 
-@unittest.skipIf(not DEVELOPER, "without DEVELOPER=1, gossip v slow")
+@pytest.mark.developer("without DEVELOPER=1, gossip v slow")
 def test_htlc_accepted_hook_fail(node_factory):
     """Send payments from l1 to l2, but l2 just declines everything.
 
@@ -1008,7 +1028,7 @@ def test_htlc_accepted_hook_fail(node_factory):
     assert len(inv) == 1 and inv[0]['status'] == 'unpaid'
 
 
-@unittest.skipIf(not DEVELOPER, "without DEVELOPER=1, gossip v slow")
+@pytest.mark.developer("without DEVELOPER=1, gossip v slow")
 def test_htlc_accepted_hook_resolve(node_factory):
     """l3 creates an invoice, l2 knows the preimage and will shortcircuit.
     """
@@ -1039,6 +1059,13 @@ def test_htlc_accepted_hook_direct_restart(node_factory, executor):
     f1 = executor.submit(l1.rpc.pay, i1)
 
     l2.daemon.wait_for_log(r'Holding onto an incoming htlc for 10 seconds')
+
+    # Check that the status mentions the HTLC being held
+    l2.rpc.listpeers()
+    peers = l2.rpc.listpeers()['peers']
+    htlc_status = peers[0]['channels'][0]['htlcs'][0].get('status', None)
+    assert htlc_status == "Waiting for the htlc_accepted hook of plugin hold_htlcs.py"
+
     needle = l2.daemon.logsearch_start
     l2.restart()
 
@@ -1050,7 +1077,7 @@ def test_htlc_accepted_hook_direct_restart(node_factory, executor):
     f1.result()
 
 
-@unittest.skipIf(not DEVELOPER, "without DEVELOPER=1, gossip v slow")
+@pytest.mark.developer("without DEVELOPER=1, gossip v slow")
 def test_htlc_accepted_hook_forward_restart(node_factory, executor):
     """l2 restarts while it is pondering what to do with an HTLC.
     """
@@ -1120,7 +1147,7 @@ def test_warning_notification(node_factory):
     l1.daemon.wait_for_log('plugin-pretend_badlog.py: log: Test warning notification\\(for broken event\\)')
 
 
-@unittest.skipIf(not DEVELOPER, "needs to deactivate shadow routing")
+@pytest.mark.developer("needs to deactivate shadow routing")
 def test_invoice_payment_notification(node_factory):
     """
     Test the 'invoice_payment' notification
@@ -1139,7 +1166,7 @@ def test_invoice_payment_notification(node_factory):
                            .format(label, preimage, msats))
 
 
-@unittest.skipIf(not DEVELOPER, "needs to deactivate shadow routing")
+@pytest.mark.developer("needs to deactivate shadow routing")
 def test_invoice_creation_notification(node_factory):
     """
     Test the 'invoice_creation' notification
@@ -1173,7 +1200,7 @@ def test_channel_opened_notification(node_factory):
                            .format(l1.info["id"], amount))
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
+@pytest.mark.developer("needs DEVELOPER=1")
 def test_forward_event_notification(node_factory, bitcoind, executor):
     """ test 'forward_event' notifications
     """
@@ -1392,15 +1419,15 @@ def test_libplugin(node_factory):
     l1.rpc.check("helloworld")
 
     # Test commands
-    assert l1.rpc.call("helloworld") == "hello world"
-    assert l1.rpc.call("helloworld", {"name": "test"}) == "hello test"
+    assert l1.rpc.call("helloworld") == {"hello": "world"}
+    assert l1.rpc.call("helloworld", {"name": "test"}) == {"hello": "test"}
     l1.stop()
     l1.daemon.opts["plugin"] = plugin
     l1.daemon.opts["name"] = "test_opt"
     l1.start()
-    assert l1.rpc.call("helloworld") == "hello test_opt"
+    assert l1.rpc.call("helloworld") == {"hello": "test_opt"}
     # But param takes over!
-    assert l1.rpc.call("helloworld", {"name": "test"}) == "hello test"
+    assert l1.rpc.call("helloworld", {"name": "test"}) == {"hello": "test"}
 
     # Test hooks and notifications
     l2 = node_factory.get_node()
@@ -1440,7 +1467,7 @@ def test_libplugin_deprecated(node_factory):
                                         'name-deprecated': 'test_opt depr',
                                         'allow-deprecated-apis': True})
 
-    assert l1.rpc.call("helloworld") == "hello test_opt depr"
+    assert l1.rpc.call("helloworld") == {"hello": "test_opt depr"}
     l1.rpc.help('testrpc-deprecated')
     assert l1.rpc.call("testrpc-deprecated") == l1.rpc.getinfo()
 
@@ -1448,6 +1475,8 @@ def test_libplugin_deprecated(node_factory):
 @unittest.skipIf(
     not DEVELOPER or DEPRECATED_APIS, "needs LIGHTNINGD_DEV_LOG_IO and new API"
 )
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_plugin_feature_announce(node_factory):
     """Check that features registered by plugins show up in messages.
 
@@ -1469,7 +1498,8 @@ def test_plugin_feature_announce(node_factory):
 
     extra = []
     if l1.config('experimental-dual-fund'):
-        extra.append(223)
+        extra.append(21)  # option-anchor-outputs
+        extra.append(29)  # option-dual-fund
 
     # Check the featurebits we've set in the `init` message from
     # feature-test.py.
@@ -1701,15 +1731,16 @@ def test_hook_crash(node_factory, executor, bitcoind):
         f1.result(10)
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_feature_set(node_factory):
     plugin = os.path.join(os.path.dirname(__file__), 'plugins/show_feature_set.py')
     l1 = node_factory.get_node(options={"plugin": plugin})
 
     fs = l1.rpc.call('getfeatureset')
-    extra = [233] if l1.config('experimental-dual-fund') else []
 
-    assert fs['init'] == expected_peer_features(extra=extra)
-    assert fs['node'] == expected_node_features(extra=extra)
+    assert fs['init'] == expected_peer_features()
+    assert fs['node'] == expected_node_features()
     assert fs['channel'] == expected_channel_features()
     assert 'invoice' in fs
 
@@ -1738,7 +1769,7 @@ def test_replacement_payload(node_factory):
     assert l2.daemon.wait_for_log("Attept to pay.*with wrong secret")
 
 
-@unittest.skipIf(not DEVELOPER, "Requires dev_sign_last_tx")
+@pytest.mark.developer("Requires dev_sign_last_tx")
 def test_watchtower(node_factory, bitcoind, directory, chainparams):
     """Test watchtower hook.
 
@@ -1827,7 +1858,9 @@ def test_plugin_fail(node_factory):
     l1.daemon.wait_for_log(r': exited during normal operation')
 
 
-@unittest.skipIf(not DEVELOPER, "without DEVELOPER=1, gossip v slow")
+@pytest.mark.developer("without DEVELOPER=1, gossip v slow")
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_coin_movement_notices(node_factory, bitcoind, chainparams):
     """Verify that coin movements are triggered correctly.
     """
@@ -1916,11 +1949,22 @@ def test_coin_movement_notices(node_factory, bitcoind, chainparams):
 
     # Special case for dual-funded channel opens
     if l2.config('experimental-dual-fund'):
+        # option_anchor_outputs
+        l2_l3_mvts = [
+            {'type': 'chain_mvt', 'credit': 1000000000, 'debit': 0, 'tag': 'deposit'},
+            {'type': 'channel_mvt', 'credit': 0, 'debit': 100000000, 'tag': 'routed'},
+            {'type': 'channel_mvt', 'credit': 50000501, 'debit': 0, 'tag': 'routed'},
+            {'type': 'chain_mvt', 'credit': 0, 'debit': 4215501, 'tag': 'chain_fees'},
+            {'type': 'chain_mvt', 'credit': 0, 'debit': 945785000, 'tag': 'withdrawal'},
+        ]
         l2_wallet_mvts = [
             {'type': 'chain_mvt', 'credit': 2000000000, 'debit': 0, 'tag': 'deposit'},
             {'type': 'chain_mvt', 'credit': 0, 'debit': 0, 'tag': 'spend_track'},
-            {'type': 'chain_mvt', 'credit': 0, 'debit': 995410000, 'tag': 'withdrawal'},
-            {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tag': 'withdrawal'},
+            # Could go in either order
+            [
+                {'type': 'chain_mvt', 'credit': 0, 'debit': 995410000, 'tag': 'withdrawal'},
+                {'type': 'chain_mvt', 'credit': 0, 'debit': 1000000000, 'tag': 'withdrawal'},
+            ],
             {'type': 'chain_mvt', 'credit': 0, 'debit': 4590000, 'tag': 'chain_fees'},
             {'type': 'chain_mvt', 'credit': 995410000, 'debit': 0, 'tag': 'deposit'},
             {'type': 'chain_mvt', 'credit': 100001000, 'debit': 0, 'tag': 'deposit'},
@@ -2117,7 +2161,7 @@ def test_important_plugin(node_factory):
     assert get_logfile_match(logpath, 'pay: Plugin marked as important, shutting down lightningd')
 
 
-@unittest.skipIf(not DEVELOPER, "tests developer-only option.")
+@pytest.mark.developer("tests developer-only option.")
 def test_dev_builtin_plugins_unimportant(node_factory):
     n = node_factory.get_node(options={"dev-builtin-plugins-unimportant": None})
     n.rpc.plugin_stop(plugin="pay")
@@ -2402,3 +2446,29 @@ def test_self_disable(node_factory):
     # Also works with dynamic load attempts
     with pytest.raises(RpcError, match="Disabled via selfdisable option"):
         l1.rpc.plugin_start(p2, selfdisable=True)
+
+
+def test_custom_notification_topics(node_factory):
+    plugin = os.path.join(
+        os.path.dirname(__file__), "plugins", "custom_notifications.py"
+    )
+    l1, l2 = node_factory.line_graph(2, opts=[{'plugin': plugin}, {}])
+    l1.rpc.emit()
+    l1.daemon.wait_for_log(r'Got a custom notification Hello world')
+
+    inv = l2.rpc.invoice(42, "lbl", "desc")['bolt11']
+    l1.rpc.pay(inv)
+
+    l1.daemon.wait_for_log(r'Got a pay_success notification from plugin pay for payment_hash [0-9a-f]{64}')
+
+    # And now make sure that we drop unannounced notifications
+    l1.rpc.faulty_emit()
+    l1.daemon.wait_for_log(
+        r"Plugin attempted to send a notification to topic .* not forwarding"
+    )
+    time.sleep(1)
+    assert not l1.daemon.is_in_log(r'Got the ididntannouncethis event')
+
+    # The plugin just dist what previously was a fatal mistake (emit
+    # an unknown notification), make sure we didn't kill it.
+    assert 'custom_notifications.py' in [p['name'] for p in l1.rpc.listconfigs()['plugins']]

@@ -212,7 +212,7 @@ static int decrypt_hsm(const char *hsm_secret_path)
 	unlink_noerr(backup);
 	tal_free(dir);
 
-	printf("Succesfully decrypted hsm_secret, be careful now :-).\n");
+	printf("Successfully decrypted hsm_secret, be careful now :-).\n");
 	return 0;
 }
 
@@ -285,7 +285,7 @@ static int encrypt_hsm(const char *hsm_secret_path)
 	unlink_noerr(backup);
 	tal_free(dir);
 
-	printf("Succesfully encrypted hsm_secret. You'll now have to pass the "
+	printf("Successfully encrypted hsm_secret. You'll now have to pass the "
 	       "--encrypted-hsm startup option.\n");
 	return 0;
 }
@@ -363,7 +363,7 @@ static int guess_to_remote(const char *address, struct node_id *node_id,
 	size_t witlen;
 
 	/* Get the hrp to accept addresses from any network. */
-	if (bech32_decode(hrp, goal_pubkeyhash, &witlen, address, 90) != 1)
+	if (bech32_decode(hrp, goal_pubkeyhash, &witlen, address, 90) != BECH32_ENCODING_BECH32)
 		errx(ERROR_USAGE, "Could not get address' network");
 	if (segwit_addr_decode(&witver, goal_pubkeyhash, &witlen, hrp, address) != 1)
 		errx(ERROR_USAGE, "Wrong bech32 address");

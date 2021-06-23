@@ -163,7 +163,8 @@ static struct command_result *json_keysend(struct command *cmd, const char *buf,
 	p->payment_secret = NULL;
 	p->amount = *msat;
 	p->routes = NULL;
-	p->min_final_cltv_expiry = DEFAULT_FINAL_CLTV_DELTA;
+	// 22 is the Rust-Lightning default and the highest minimum we know of.
+	p->min_final_cltv_expiry = 22;
 	p->features = NULL;
 	p->invstring = NULL;
 	p->why = "Initial attempt";
@@ -377,6 +378,11 @@ static const struct plugin_hook hooks[] = {
 	},
 };
 
+static const char *notification_topics[] = {
+	"pay_success",
+	"pay_failure",
+};
+
 int main(int argc, char *argv[])
 {
 	struct feature_set features;
@@ -388,5 +394,5 @@ int main(int argc, char *argv[])
 
 	plugin_main(argv, init, PLUGIN_STATIC, true, &features, commands,
 		    ARRAY_SIZE(commands), NULL, 0, hooks, ARRAY_SIZE(hooks),
-		    NULL);
+		    notification_topics, ARRAY_SIZE(notification_topics), NULL);
 }

@@ -55,6 +55,9 @@ struct htlc_in {
 	struct secret blinding_ss;
 	/* true if we supplied the preimage */
 	bool *we_filled;
+
+	/* A simple text annotation shown in `listpeers` */
+	char *status;
 };
 
 struct htlc_out {
@@ -93,6 +96,9 @@ struct htlc_out {
 
 	/* Blinding to send alongside, if any. */
 	struct pubkey *blinding;
+
+	/* Timer we use in case they don't add an HTLC in a timely manner. */
+	struct oneshot *timeout;
 };
 
 static inline const struct htlc_key *keyof_htlc_in(const struct htlc_in *in)

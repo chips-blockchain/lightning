@@ -27,7 +27,8 @@ import time
 import unittest
 
 
-@unittest.skipIf(not DEVELOPER, "needs --dev-disconnect")
+@pytest.mark.developer("needs --dev-disconnect")
+@pytest.mark.openchannel('v1')
 def test_stop_pending_fundchannel(node_factory, executor):
     """Stop the daemon while waiting for an accept_channel
 
@@ -161,6 +162,8 @@ def test_bitcoin_ibd(node_factory, bitcoind):
     assert 'warning_bitcoind_sync' not in l1.rpc.getinfo()
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_lightningd_still_loading(node_factory, bitcoind, executor):
     """Test that we recognize we haven't got all blocks from bitcoind"""
 
@@ -290,7 +293,7 @@ def test_ping(node_factory):
                                .format(l2.info['version']))
 
 
-@unittest.skipIf(not DEVELOPER, "needs --dev-disconnect")
+@pytest.mark.developer("needs --dev-disconnect")
 def test_htlc_sig_persistence(node_factory, bitcoind, executor):
     """Interrupt a payment between two peers, then fail and recover funds using the HTLC sig.
     """
@@ -338,7 +341,7 @@ def test_htlc_sig_persistence(node_factory, bitcoind, executor):
     assert len(l1.rpc.listfunds()['outputs']) == 3
 
 
-@unittest.skipIf(not DEVELOPER, "needs to deactivate shadow routing")
+@pytest.mark.developer("needs to deactivate shadow routing")
 def test_htlc_out_timeout(node_factory, bitcoind, executor):
     """Test that we drop onchain if the peer doesn't time out HTLC"""
 
@@ -405,7 +408,7 @@ def test_htlc_out_timeout(node_factory, bitcoind, executor):
     l2.daemon.wait_for_log('onchaind complete, forgetting peer')
 
 
-@unittest.skipIf(not DEVELOPER, "needs to deactivate shadow routing")
+@pytest.mark.developer("needs to deactivate shadow routing")
 def test_htlc_in_timeout(node_factory, bitcoind, executor):
     """Test that we drop onchain if the peer doesn't accept fulfilled HTLC"""
 
@@ -465,7 +468,7 @@ def test_htlc_in_timeout(node_factory, bitcoind, executor):
 
 
 @unittest.skipIf(not TEST_NETWORK == 'regtest', 'must be on bitcoin network')
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
+@pytest.mark.developer("needs DEVELOPER=1")
 def test_bech32_funding(node_factory, chainparams):
     # Don't get any funds from previous runs.
     l1, l2 = node_factory.line_graph(2, opts={'random_hsm': True}, fundchannel=False)
@@ -631,6 +634,7 @@ def test_withdraw_misc(node_factory, bitcoind, chainparams):
     for out in l1.rpc.listfunds()['outputs']:
         if out['reserved']:
             inputs += [{'txid': out['txid'], 'vout': out['output']}]
+            assert out['reserved_to_block'] > bitcoind.rpc.getblockchaininfo()['blocks']
     l1.rpc.unreserveinputs(bitcoind.rpc.createpsbt(inputs, []))
 
     # Test withdrawal to self.
@@ -863,7 +867,7 @@ def test_multirpc(node_factory):
     sock.close()
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
+@pytest.mark.developer("needs DEVELOPER=1")
 def test_multiplexed_rpc(node_factory):
     """Test that we can do multiple RPCs which exit in different orders"""
     l1 = node_factory.get_node()
@@ -1105,7 +1109,7 @@ def test_daemon_option(node_factory):
 
 
 @flaky
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
+@pytest.mark.developer("needs DEVELOPER=1")
 def test_blockchaintrack(node_factory, bitcoind):
     """Check that we track the blockchain correctly across reorgs
     """
@@ -1150,7 +1154,9 @@ def test_blockchaintrack(node_factory, bitcoind):
     assert [o for o in l1.rpc.listfunds()['outputs'] if o['status'] != "unconfirmed"] == []
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
+@pytest.mark.developer("needs DEVELOPER=1")
+@pytest.mark.openchannel('v2')
+@pytest.mark.openchannel('v1')
 def test_funding_reorg_private(node_factory, bitcoind):
     """Change funding tx height after lockin, between node restart.
     """
@@ -1171,6 +1177,7 @@ def test_funding_reorg_private(node_factory, bitcoind):
              == ['{}_AWAITING_LOCKIN:Funding needs 1 more confirmations for lockin.'.format(daemon)])
     bitcoind.generate_block(1)                      # height 107
     l1.wait_channel_active('106x1x0')
+    l2.wait_channel_active('106x1x0')
     l1.stop()
 
     # Create a fork that changes short_channel_id from 106x1x0 to 108x1x0
@@ -1191,7 +1198,9 @@ def test_funding_reorg_private(node_factory, bitcoind):
     l2.daemon.wait_for_log(r'Deleting channel')
 
 
-@unittest.skipIf(not DEVELOPER, "needs DEVELOPER=1")
+@pytest.mark.developer("needs DEVELOPER=1")
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_funding_reorg_remote_lags(node_factory, bitcoind):
     """Nodes may disagree about short_channel_id before channel announcement
     """
@@ -1204,6 +1213,7 @@ def test_funding_reorg_remote_lags(node_factory, bitcoind):
     l1.rpc.fundchannel(l2.info['id'], "all")
     bitcoind.generate_block(5)                      # heights 103 - 107
     l1.wait_channel_active('103x1x0')
+    l2.wait_channel_active('103x1x0')
 
     # Make l2 temporary blind for blocks > 107
     def no_more_blocks(req):
@@ -1335,6 +1345,8 @@ def test_bitcoind_goes_backwards(node_factory, bitcoind):
 
 
 @flaky
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_reserve_enforcement(node_factory, executor):
     """Channeld should disallow you spending into your reserve"""
     l1, l2 = node_factory.line_graph(2, opts={'may_reconnect': True, 'allow_warning': True})
@@ -1363,7 +1375,7 @@ def test_reserve_enforcement(node_factory, executor):
     assert only_one(l1.rpc.listpeers()['peers'])['connected'] is False
 
 
-@unittest.skipIf(not DEVELOPER, "needs dev_disconnect")
+@pytest.mark.developer("needs dev_disconnect")
 def test_htlc_send_timeout(node_factory, bitcoind, compat):
     """Test that we don't commit an HTLC to an unreachable node."""
     # Feerates identical so we don't get gratuitous commit to update them
@@ -1409,7 +1421,7 @@ def test_htlc_send_timeout(node_factory, bitcoind, compat):
     assert not l2.daemon.is_in_log(r'{}-.*channeld.*: \[IN\] 0013'.format(l3.info['id']))
     assert not l2.daemon.is_in_log(r'{}-.*channeld.*: \[OUT\] 0084'.format(l3.info['id']))
     # L2 killed the channel with l3 because it was too slow.
-    l2.daemon.wait_for_log('{}-.*channeld-.*Adding HTLC too slow: killing connection'.format(l3.info['id']))
+    l2.daemon.wait_for_log('{}-.*channeld-.*Adding HTLC 0 too slow: killing connection'.format(l3.info['id']))
 
 
 def test_ipv4_and_ipv6(node_factory):
@@ -1470,54 +1482,50 @@ def test_feerates(node_factory):
         assert t not in feerates['perkb']
 
     # Now try setting them, one at a time.
-    # Set CONSERVATIVE/2 feerate, for max and unilateral_close
+    # Set CONSERVATIVE/2 feerate, for max
     l1.set_feerates((15000, 0, 0, 0), True)
-    wait_for(lambda: len(l1.rpc.feerates('perkw')['perkw']) == 3)
+    wait_for(lambda: len(l1.rpc.feerates('perkw')['perkw']) == 2)
     feerates = l1.rpc.feerates('perkw')
-    assert feerates['perkw']['unilateral_close'] == 15000
     assert feerates['warning_missing_feerates'] == 'Some fee estimates unavailable: bitcoind startup?'
     assert 'perkb' not in feerates
     assert feerates['perkw']['max_acceptable'] == 15000 * 10
     assert feerates['perkw']['min_acceptable'] == 253
 
-    # Set CONSERVATIVE/3 feerate, for htlc_resolution and penalty
+    # Set ECONOMICAL/6 feerate, for unilateral_close and htlc_resolution
     l1.set_feerates((15000, 11000, 0, 0), True)
-    wait_for(lambda: len(l1.rpc.feerates('perkw')['perkw']) == 5)
+    wait_for(lambda: len(l1.rpc.feerates('perkw')['perkw']) == 4)
     feerates = l1.rpc.feerates('perkw')
-    assert feerates['perkw']['unilateral_close'] == 15000
+    assert feerates['perkw']['unilateral_close'] == 11000
     assert feerates['perkw']['htlc_resolution'] == 11000
-    assert feerates['perkw']['penalty'] == 11000
     assert feerates['warning_missing_feerates'] == 'Some fee estimates unavailable: bitcoind startup?'
     assert 'perkb' not in feerates
     assert feerates['perkw']['max_acceptable'] == 15000 * 10
     assert feerates['perkw']['min_acceptable'] == 253
 
-    # Set ECONOMICAL/4 feerate, for all but min (so, no mutual_close feerate)
+    # Set ECONOMICAL/12 feerate, for all but min (so, no mutual_close feerate)
     l1.set_feerates((15000, 11000, 6250, 0), True)
     wait_for(lambda: len(l1.rpc.feerates('perkb')['perkb']) == len(types) - 1 + 2)
     feerates = l1.rpc.feerates('perkb')
-    assert feerates['perkb']['unilateral_close'] == 15000 * 4
+    assert feerates['perkb']['unilateral_close'] == 11000 * 4
     assert feerates['perkb']['htlc_resolution'] == 11000 * 4
-    assert feerates['perkb']['penalty'] == 11000 * 4
     assert 'mutual_close' not in feerates['perkb']
     for t in types:
-        if t not in ("unilateral_close", "htlc_resolution", "penalty", "mutual_close"):
+        if t not in ("unilateral_close", "htlc_resolution", "mutual_close"):
             assert feerates['perkb'][t] == 25000
     assert feerates['warning_missing_feerates'] == 'Some fee estimates unavailable: bitcoind startup?'
     assert 'perkw' not in feerates
     assert feerates['perkb']['max_acceptable'] == 15000 * 4 * 10
     assert feerates['perkb']['min_acceptable'] == 253 * 4
 
-    # Set ECONOMICAL/100 feerate for min
+    # Set ECONOMICAL/100 feerate for min and mutual_close
     l1.set_feerates((15000, 11000, 6250, 5000), True)
     wait_for(lambda: len(l1.rpc.feerates('perkw')['perkw']) >= len(types) + 2)
     feerates = l1.rpc.feerates('perkw')
-    assert feerates['perkw']['unilateral_close'] == 15000
+    assert feerates['perkw']['unilateral_close'] == 11000
     assert feerates['perkw']['htlc_resolution'] == 11000
-    assert feerates['perkw']['penalty'] == 11000
     assert feerates['perkw']['mutual_close'] == 5000
     for t in types:
-        if t not in ("unilateral_close", "htlc_resolution", "penalty", "mutual_close"):
+        if t not in ("unilateral_close", "htlc_resolution", "mutual_close"):
             assert feerates['perkw'][t] == 25000 // 4
     assert 'warning' not in feerates
     assert 'perkb' not in feerates
@@ -1686,7 +1694,7 @@ def test_check_command(node_factory):
     sock.close()
 
 
-@unittest.skipIf(not DEVELOPER, "FIXME: without DEVELOPER=1 we timeout")
+@pytest.mark.developer("FIXME: without DEVELOPER=1 we timeout")
 def test_bad_onion(node_factory, bitcoind):
     """Test that we get a reasonable error from sendpay when an onion is bad"""
     l1, l2, l3, l4 = node_factory.line_graph(4, wait_for_announce=True,
@@ -1737,7 +1745,7 @@ def test_bad_onion(node_factory, bitcoind):
     assert err.value.error['data']['erring_channel'] == route[1]['channel']
 
 
-@unittest.skipIf(not DEVELOPER, "Needs DEVELOPER=1 to force onion fail")
+@pytest.mark.developer("Needs DEVELOPER=1 to force onion fail")
 def test_bad_onion_immediate_peer(node_factory, bitcoind):
     """Test that we handle the malformed msg when we're the origin"""
     l1, l2 = node_factory.line_graph(2, opts={'dev-fail-process-onionpacket': None})
@@ -1806,7 +1814,7 @@ def test_bitcoind_fail_first(node_factory, bitcoind, executor):
     f.result()
 
 
-@unittest.skipIf(not DEVELOPER, "needs --dev-force-bip32-seed")
+@pytest.mark.developer("needs --dev-force-bip32-seed")
 @unittest.skipIf(TEST_NETWORK != 'regtest', "Addresses are network specific")
 def test_dev_force_bip32_seed(node_factory):
     l1 = node_factory.get_node(options={'dev-force-bip32-seed': '0000000000000000000000000000000000000000000000000000000000000001'})
@@ -1823,7 +1831,7 @@ def test_dev_force_bip32_seed(node_factory):
     assert bech32 == "bcrt1q622lwmdzxxterumd746eu3d3t40pq53p62zhlz"
 
 
-@unittest.skipIf(not DEVELOPER, "needs dev command")
+@pytest.mark.developer("needs dev command")
 def test_dev_demux(node_factory):
     l1 = node_factory.get_node(may_fail=True, allow_broken_log=True)
 
@@ -1874,6 +1882,8 @@ def test_dev_demux(node_factory):
         l1.rpc.call('dev', {'subcommand': 'crash'})
 
 
+@pytest.mark.openchannel('v1')
+@pytest.mark.openchannel('v2')
 def test_list_features_only(node_factory):
     features = subprocess.check_output(['lightningd/lightningd',
                                         '--list-features-only']).decode('utf-8').splitlines()
@@ -1890,6 +1900,8 @@ def test_list_features_only(node_factory):
         expected += ['option_anchor_outputs/odd']
         expected += ['option_shutdown_anysegwit/odd']
         expected += ['option_onion_messages/odd']
+    else:
+        expected += ['option_shutdown_anysegwit/odd']
     assert features == expected
 
 
@@ -2225,7 +2237,7 @@ def test_waitblockheight(node_factory, executor, bitcoind):
     fut2.result(5)
 
 
-@unittest.skipIf(not DEVELOPER, "Needs dev-sendcustommsg")
+@pytest.mark.developer("Needs dev-sendcustommsg")
 def test_sendcustommsg(node_factory):
     """Check that we can send custommsgs to peers in various states.
 
@@ -2370,7 +2382,7 @@ def test_sendonionmessage_reply(node_factory):
     assert l1.daemon.wait_for_log('Got onionmsg')
 
 
-@unittest.skipIf(not DEVELOPER, "needs --dev-force-privkey")
+@pytest.mark.developer("needs --dev-force-privkey")
 def test_getsharedsecret(node_factory):
     """
     Test getsharedsecret command.
@@ -2402,7 +2414,7 @@ def test_commitfee_option(node_factory):
 
     mock_wu = 5000
     for l in [l1, l2]:
-        l.set_feerates((mock_wu, 0, 0, 0), True)
+        l.set_feerates((0, mock_wu, 0, 0), True)
     l1_commit_fees = l1.rpc.call("estimatefees")["unilateral_close"]
     l2_commit_fees = l2.rpc.call("estimatefees")["unilateral_close"]
 
@@ -2529,3 +2541,23 @@ def test_version_reexec(node_factory, bitcoind):
     # Now "fix" it, it should restart.
     os.unlink(verfile)
     l1.daemon.wait_for_log("Server started with public key")
+
+
+def test_notimestamp_logging(node_factory):
+    l1 = node_factory.get_node(options={'log-timestamps': False})
+    assert l1.daemon.logs[0].startswith("DEBUG")
+
+    assert l1.rpc.listconfigs()['log-timestamps'] is False
+
+
+def test_getlog(node_factory):
+    """Test the getlog command"""
+    l1 = node_factory.get_node(options={'log-level': 'io'})
+
+    # Default will skip some entries
+    logs = l1.rpc.getlog()['log']
+    assert [l for l in logs if l['type'] == 'SKIPPED'] != []
+
+    # This should not
+    logs = l1.rpc.getlog(level='io')['log']
+    assert [l for l in logs if l['type'] == 'SKIPPED'] == []

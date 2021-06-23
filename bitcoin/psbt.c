@@ -688,6 +688,7 @@ struct wally_psbt *psbt_from_b64(const tal_t *ctx,
 	else
 		psbt = NULL;
 	tal_wally_end(tal_steal(ctx, psbt));
+
 	return psbt;
 }
 
@@ -738,10 +739,6 @@ struct wally_psbt *psbt_from_bytes(const tal_t *ctx, const u8 *bytes,
 	else
 		psbt = NULL;
 	tal_wally_end(tal_steal(ctx, psbt));
-
-	/* FIXME: Patch for the empty-tx bug in libwally */
-	if (!psbt && byte_len == 19)
-		psbt = create_psbt(ctx, 0, 0, 0);
 
 	return psbt;
 }

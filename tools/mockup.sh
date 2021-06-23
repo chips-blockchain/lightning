@@ -1,5 +1,13 @@
 #!/usr/bin/env bash
 
+if [ $# = 0 ]; then
+    echo 'Usage: mockup.sh <filename> [SYMBOLS...]' >&2
+    exit 1
+fi
+
+UPDIRNAME=$(dirname "$(dirname "$1")")
+shift
+
 if [ $# -eq 0 ]; then
     # With no args, read stdin to scrape compiler output.
     # shellcheck disable=SC2046
@@ -29,7 +37,8 @@ fi
 for SYMBOL; do
     # If there are multiple declarations, pick first (eg. common/memleak.h
     # has notleak_ as a declaration, and then an inline).
-    WHERE=$(grep -nH "^[a-zA-Z0-9_ (),]* [*]*$SYMBOL(" ./*/*.h | head -n1)
+    # Also, prefer local headers over generic ones.
+    WHERE=$(shopt -s nullglob; grep -nH "^[a-zA-Z0-9_ (),]* [*]*$SYMBOL(" "$UPDIRNAME"/*.h ./*/*.h | head -n1)
     if [ x"$WHERE" = x ]; then
 	echo "/* Could not find declaration for $SYMBOL */"
 	continue
@@ -52,5 +61,5 @@ for SYMBOL; do
 
     echo "/* Generated stub for $SYMBOL */"
 
-    tail -n "+${LINE}" < "$FILE" | head -n "$NUM" | sed 's/^extern *//' | sed 's/PRINTF_FMT([^)]*)//' | sed 's/NON_NULL_ARGS([^)]*)//' | sed 's/NO_NULL_ARGS//g' | sed 's/NORETURN//g' | sed 's/LAST_ARG_NULL//g' | sed 's/WARN_UNUSED_RESULT//g' | sed 's/,/ UNNEEDED,/g' | sed 's/\([a-z0-9A-Z*_]* [a-z0-9A-Z*_]*\));/\1 UNNEEDED);/' | sed "s/;\$/$STUB/" | sed 's/[[:space:]]*$//'
+    tail -n "+${LINE}" < "$FILE" | head -n "$NUM" | sed 's/^extern *//' | sed 's/PRINTF_FMT([^)]*)//' | sed 's/NON_NULL_ARGS([^)]*)//' | sed 's/NO_NULL_ARGS//g' | sed 's/NORETURN//g' | sed 's/RETURNS_NONNULL//g' | sed 's/LAST_ARG_NULL//g' | sed 's/WARN_UNUSED_RESULT//g' | sed 's/,/ UNNEEDED,/g' | sed 's/\([a-z0-9A-Z*_]* [a-z0-9A-Z*_]*\));/\1 UNNEEDED);/' | sed "s/;\$/$STUB/" | sed 's/[[:space:]]*$//'
 done

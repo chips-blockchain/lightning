@@ -10,6 +10,7 @@
 #include <common/onion.h>
 #include <common/onionreply.h>
 #include <common/param.h>
+#include <common/route.h>
 #include <common/timeout.h>
 #include <gossipd/gossipd_wiregen.h>
 #include <lightningd/chaintopology.h>
@@ -999,16 +1000,17 @@ send_payment_core(struct lightningd *ld,
 	if (offer_err)
 		return offer_err;
 
-	channel = active_channel_by_id(ld, &first_hop->nodeid, NULL);
-	if (!channel) {
+	channel = active_channel_by_id(ld, &first_hop->node_id, NULL);
+	if (!channel || !channel_can_add_htlc(channel)) {
 		struct json_stream *data
 			= json_stream_fail(cmd, PAY_TRY_OTHER_ROUTE,
 					   "No connection to first "
 					   "peer found");
 
 		json_add_routefail_info(data, 0, WIRE_UNKNOWN_NEXT_PEER,
-					&ld->id, &first_hop->channel_id,
-					node_id_idx(&ld->id, &first_hop->nodeid),
+					&ld->id, NULL,
+					node_id_idx(&ld->id,
+						    &first_hop->node_id),
 					NULL);
 		json_object_end(data);
 		return command_failed(cmd, data);
@@ -1020,7 +1022,7 @@ send_payment_core(struct lightningd *ld,
 	if (failmsg) {
 		fail = immediate_routing_failure(cmd, ld,
 						 fromwire_peektype(failmsg),
-						 &first_hop->channel_id,
+						 channel->scid,
 						 &channel->peer->id);
 
 		return sendpay_fail(
@@ -1115,7 +1117,7 @@ send_payment(struct lightningd *ld,
 	path = sphinx_path_new(tmpctx, rhash->u.u8);
 	/* Extract IDs for each hop: create_onionpacket wants array. */
 	for (i = 0; i < n_hops; i++)
-		ids[i] = route[i].nodeid;
+		ids[i] = route[i].node_id;
 
 	/* Create sphinx path */
 	for (i = 0; i < n_hops - 1; i++) {
@@ -1125,7 +1127,7 @@ send_payment(struct lightningd *ld,
 		sphinx_add_hop(path, &pubkey,
 			       take(onion_nonfinal_hop(NULL,
 					should_use_tlv(route[i].style),
-					&route[i + 1].channel_id,
+					&route[i + 1].scid,
 					route[i + 1].amount,
 					base_expiry + route[i + 1].delay,
 					route[i].blinding,
@@ -1170,7 +1172,7 @@ send_payment(struct lightningd *ld,
 	/* Copy channels used along the route. */
 	channels = tal_arr(tmpctx, struct short_channel_id, n_hops);
 	for (i = 0; i < n_hops; ++i)
-		channels[i] = route[i].channel_id;
+		channels[i] = route[i].scid;
 
 	log_info(ld->log, "Sending %s over %zu hops to deliver %s",
 		 type_to_string(tmpctx, struct amount_msat, &route[0].amount),
@@ -1186,13 +1188,12 @@ static struct command_result *
 param_route_hop(struct command *cmd, const char *name, const char *buffer,
 		const jsmntok_t *tok, struct route_hop **hop)
 {
-	const jsmntok_t *idtok, *channeltok, *directiontok, *amounttok, *delaytok;
+	const jsmntok_t *idtok, *channeltok, *amounttok, *delaytok;
 	struct route_hop *res;
 
 	res = tal(cmd, struct route_hop);
 	idtok = json_get_member(buffer, tok, "id");
 	channeltok = json_get_member(buffer, tok, "channel");
-	directiontok = json_get_member(buffer, tok, "direction");
 	amounttok = json_get_member(buffer, tok, "amount_msat");
 	delaytok = json_get_member(buffer, tok, "delay");
 
@@ -1201,11 +1202,6 @@ param_route_hop(struct command *cmd, const char *name, const char *buffer,
 		return command_fail(
 		    cmd, JSONRPC2_INVALID_PARAMS,
 		    "Either 'id' or 'channel' is required for a route_hop");
-
-	if (channeltok && !directiontok)
-		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
-				    "When specifying a channel you must also "
-				    "specify the direction");
 
 	if (!amounttok)
 		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
@@ -1218,23 +1214,18 @@ param_route_hop(struct command *cmd, const char *name, const char *buffer,
 	/* Parsing of actual values including sanity check for all parsed
 	 * values. */
 	if (!idtok) {
-		memset(&res->nodeid, 0, sizeof(struct node_id));
-	} else if (!json_to_node_id(buffer, idtok, &res->nodeid)) {
+		memset(&res->node_id, 0, sizeof(struct node_id));
+	} else if (!json_to_node_id(buffer, idtok, &res->node_id)) {
 		return command_fail_badparam(cmd, name, buffer, idtok,
 					     "should be a node_id");
 	}
 
 	if (!channeltok) {
-		memset(&res->channel_id, 0, sizeof(struct short_channel_id));
-	} else if (!json_to_short_channel_id(buffer, channeltok, &res->channel_id)) {
+		memset(&res->scid, 0, sizeof(struct short_channel_id));
+	} else if (!json_to_short_channel_id(buffer, channeltok, &res->scid)) {
 		return command_fail_badparam(cmd, name, buffer, channeltok,
 					     "should be a short_channel_id");
 	}
-
-	if (directiontok && (!json_to_int(buffer, directiontok, &res->direction) ||
-			     res->direction > 1 || res->direction < 0))
-		return command_fail_badparam(cmd, name, buffer, directiontok,
-					     "should be 0 or 1");
 
 	if (!json_to_msat(buffer, amounttok, &res->amount))
 		return command_fail_badparam(cmd, name, buffer, amounttok,
@@ -1357,6 +1348,7 @@ static struct command_result *param_route_hops(struct command *cmd,
 			   p_opt("id", param_node_id, &id),
 			   p_opt("delay", param_number, &delay),
 			   p_opt("channel", param_short_channel_id, &channel),
+			   /* Allowed (getroute supplies it) but ignored */
 			   p_opt("direction", param_number, &direction),
 			   p_opt("style", param_route_hop_style, &style),
 			   p_opt("blinding", param_pubkey, &blinding),
@@ -1394,14 +1386,12 @@ static struct command_result *param_route_hops(struct command *cmd,
 			default_style = ROUTE_HOP_LEGACY;
 
 		(*hops)[i].amount = *msat;
-		(*hops)[i].nodeid = *id;
+		(*hops)[i].node_id = *id;
 		(*hops)[i].delay = *delay;
-		(*hops)[i].channel_id = *channel;
+		(*hops)[i].scid = *channel;
 		(*hops)[i].blinding = blinding;
 		(*hops)[i].enctlv = enctlv;
 		(*hops)[i].style = style ? *style : default_style;
-		/* FIXME: Actually ignored by sending code! */
-		(*hops)[i].direction = direction ? *direction : 0;
 	}
 
 	return NULL;
@@ -1670,6 +1660,7 @@ static struct command_result *json_createonion(struct command *cmd,
 	struct secret *session_key, *shared_secrets;
 	struct sphinx_path *sp;
 	u8 *assocdata, *serialized;
+	u32 *packet_size;
 	struct onionpacket *packet;
 	struct sphinx_hop *hops;
 
@@ -1677,6 +1668,7 @@ static struct command_result *json_createonion(struct command *cmd,
 		   p_req("hops", param_hops_array, &hops),
 		   p_req("assocdata", param_bin_from_hex, &assocdata),
 		   p_opt("session_key", param_secret, &session_key),
+		   p_opt_def("onion_size", param_number, &packet_size, ROUTING_INFO_SIZE),
 		   NULL)) {
 		return command_param_failed();
 	}
@@ -1689,12 +1681,12 @@ static struct command_result *json_createonion(struct command *cmd,
 	for (size_t i=0; i<tal_count(hops); i++)
 		sphinx_add_hop(sp, &hops[i].pubkey, hops[i].raw_payload);
 
-	if (sphinx_path_payloads_size(sp) > ROUTING_INFO_SIZE)
+	if (sphinx_path_payloads_size(sp) > *packet_size)
 		return command_fail(
 		    cmd, JSONRPC2_INVALID_PARAMS,
 		    "Payloads exceed maximum onion packet size.");
 
-	packet = create_onionpacket(cmd, sp, ROUTING_INFO_SIZE, &shared_secrets);
+	packet = create_onionpacket(cmd, sp, *packet_size, &shared_secrets);
 	if (!packet)
 		return command_fail(cmd, LIGHTNINGD,
 				    "Could not create onion packet");

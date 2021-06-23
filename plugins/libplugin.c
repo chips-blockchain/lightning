@@ -6,6 +6,7 @@
 #include <ccan/tal/str/str.h>
 #include <common/daemon.h>
 #include <common/json_stream.h>
+#include <common/route.h>
 #include <common/utils.h>
 #include <errno.h>
 #include <plugins/libplugin.h>
@@ -91,6 +92,9 @@ struct plugin {
 	/* Location of the RPC filename in case we need to defer RPC
 	 * initialization or need to recover from a disconnect. */
 	const char *rpc_location;
+
+	const char **notif_topics;
+	size_t num_notif_topics;
 };
 
 /* command_result is mainly used as a compile-time check to encourage you
@@ -106,6 +110,10 @@ struct command_result *command_param_failed(void)
 	return &complete;
 }
 
+struct command_result *command_done(void)
+{
+	return &complete;
+}
 
 static void ld_send(struct plugin *plugin, struct json_stream *stream)
 {
@@ -222,8 +230,8 @@ static struct command_result *command_complete(struct command *cmd,
 	return &complete;
 }
 
-struct command_result *WARN_UNUSED_RESULT
-command_finished(struct command *cmd, struct json_stream *response)
+struct command_result *command_finished(struct command *cmd,
+					struct json_stream *response)
 {
 	/* "result" or "error" object */
 	json_object_end(response);
@@ -334,21 +342,6 @@ command_success(struct command *cmd, const struct json_out *result)
 	struct json_stream *js = jsonrpc_stream_start(cmd);
 
 	json_out_add_splice(js->jout, "result", result);
-	return command_complete(cmd, js);
-}
-
-struct command_result *WARN_UNUSED_RESULT
-command_success_str(struct command *cmd, const char *str)
-{
-	struct json_stream *js = jsonrpc_stream_start(cmd);
-
-	if (str)
-		json_add_string(js, "result", str);
-	else {
-		/* Use an empty object if they don't want anything. */
-		json_object_start(js, "result");
-		json_object_end(js);
-	}
 	return command_complete(cmd, js);
 }
 
@@ -667,6 +660,14 @@ handle_getmanifest(struct command *getmanifest_cmd,
 
 	json_add_bool(params, "dynamic", p->restartability == PLUGIN_RESTARTABLE);
 
+	json_array_start(params, "notifications");
+	for (size_t i = 0; p->notif_topics && i < p->num_notif_topics; i++) {
+		json_object_start(params, NULL);
+		json_add_string(params, "method", p->notif_topics[i]);
+		json_object_end(params);
+	}
+	json_array_end(params);
+
 	return command_finished(getmanifest_cmd, params);
 }
 
@@ -888,7 +889,7 @@ static struct command_result *handle_init(struct command *cmd,
 	if (with_rpc)
 		io_new_conn(p, p->rpc_conn->fd, rpc_conn_init, p);
 
-	return command_success_str(cmd, NULL);
+	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
 }
 
 char *u64_option(const char *arg, u64 *i)
@@ -1015,6 +1016,25 @@ static void plugin_logv(struct plugin *p, enum log_level l,
 	json_object_end(js);
 
 	jsonrpc_finish_and_send(p, js);
+}
+
+struct json_stream *plugin_notification_start(struct plugin *plugin,
+					      const char *method)
+{
+	struct json_stream *js = new_json_stream(plugin, NULL, NULL);
+
+	json_object_start(js, NULL);
+	json_add_string(js, "jsonrpc", "2.0");
+	json_add_string(js, "method", method);
+
+	json_object_start(js, "params");
+	return js;
+}
+void plugin_notification_end(struct plugin *plugin,
+			     struct json_stream *stream)
+{
+	json_object_end(stream);
+	jsonrpc_finish_and_send(plugin, stream);
 }
 
 struct json_stream *plugin_notify_start(struct command *cmd, const char *method)
@@ -1312,6 +1332,8 @@ static struct plugin *new_plugin(const tal_t *ctx,
 				 size_t num_notif_subs,
 				 const struct plugin_hook *hook_subs,
 				 size_t num_hook_subs,
+				 const char **notif_topics,
+				 size_t num_notif_topics,
 				 va_list ap)
 {
 	const char *optname;
@@ -1349,6 +1371,8 @@ static struct plugin *new_plugin(const tal_t *ctx,
 
 	p->commands = commands;
 	p->num_commands = num_commands;
+	p->notif_topics = notif_topics;
+	p->num_notif_topics = num_notif_topics;
 	p->notif_subs = notif_subs;
 	p->num_notif_subs = num_notif_subs;
 	p->hook_subs = hook_subs;
@@ -1381,6 +1405,8 @@ void plugin_main(char *argv[],
 		 size_t num_notif_subs,
 		 const struct plugin_hook *hook_subs,
 		 size_t num_hook_subs,
+		 const char **notif_topics,
+		 size_t num_notif_topics,
 		 ...)
 {
 	struct plugin *plugin;
@@ -1393,10 +1419,10 @@ void plugin_main(char *argv[],
 	/* Note this already prints to stderr, which is enough for now */
 	daemon_setup(argv[0], NULL, NULL);
 
-	va_start(ap, num_hook_subs);
+	va_start(ap, num_notif_topics);
 	plugin = new_plugin(NULL, init, restartability, init_rpc, features, commands,
 			    num_commands, notif_subs, num_notif_subs, hook_subs,
-			    num_hook_subs, ap);
+			    num_hook_subs, notif_topics, num_notif_topics, ap);
 	va_end(ap);
 	setup_command_usage(plugin);
 
@@ -1579,8 +1605,8 @@ static bool json_to_route_hop_inplace(struct route_hop *dst, const char *buffer,
 	    amounttok == NULL || delaytok == NULL || styletok == NULL)
 		return false;
 
-	json_to_node_id(buffer, idtok, &dst->nodeid);
-	json_to_short_channel_id(buffer, channeltok, &dst->channel_id);
+	json_to_node_id(buffer, idtok, &dst->node_id);
+	json_to_short_channel_id(buffer, channeltok, &dst->scid);
 	json_to_int(buffer, directiontok, &dst->direction);
 	json_to_msat(buffer, amounttok, &dst->amount);
 	json_to_number(buffer, delaytok, &dst->delay);

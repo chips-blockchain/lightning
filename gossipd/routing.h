@@ -9,6 +9,7 @@
 #include <common/amount.h>
 #include <common/gossip_constants.h>
 #include <common/node_id.h>
+#include <common/route.h>
 #include <gossipd/broadcast.h>
 #include <gossipd/gossip_store.h>
 #include <wire/onion_wire.h>
@@ -19,34 +20,11 @@ struct peer;
 struct routing_state;
 
 struct half_chan {
-	/* millisatoshi. */
-	u32 base_fee;
-	/* millionths */
-	u32 proportional_fee;
-
-	/* Delay for HTLC in blocks.*/
-	u32 delay;
-
 	/* Timestamp and index into store file */
 	struct broadcastable bcast;
 
-	/* Flags as specified by the `channel_update`s, among other
-	 * things indicated direction wrt the `channel_id` */
-	u8 channel_flags;
-
-	/* Flags as specified by the `channel_update`s, indicates
-	 * optional fields.  */
-	u8 message_flags;
-
 	/* Token bucket */
 	u8 tokens;
-
-	/* Feature cache for parent chan: squeezed in here where it would
-	 * otherwise simply be padding. */
-	u8 any_features;
-
-	/* Minimum and maximum number of msatoshi in an HTLC */
-	struct amount_msat htlc_minimum, htlc_maximum;
 };
 
 struct chan {
@@ -95,11 +73,6 @@ static inline bool is_halfchan_defined(const struct half_chan *hc)
 	return hc->bcast.index != 0;
 }
 
-static inline bool is_halfchan_enabled(const struct half_chan *hc)
-{
-	return is_halfchan_defined(hc) && !(hc->channel_flags & ROUTING_FLAGS_DISABLED);
-}
-
 /* Container for per-node channel pointers.  Better cache performance
  * than uintmap, and we don't need ordering. */
 static inline const struct short_channel_id *chan_map_scid(const struct chan *c)
@@ -137,11 +110,6 @@ HTABLE_DEFINE_TYPE(struct local_chan,
 		   local_chan_map_scid, hash_scid, local_chan_eq_scid,
 		   local_chan_map);
 
-enum route_hop_style {
-	ROUTE_HOP_LEGACY = 1,
-	ROUTE_HOP_TLV = 2,
-};
-
 /* For a small number of channels (by far the most common) we use a simple
  * array, with empty buckets NULL.  For larger, we use a proper hash table,
  * with the extra allocation that implies. */
@@ -156,22 +124,11 @@ struct node {
 	/* Token bucket */
 	u8 tokens;
 
-	/* route_hop_style */
-	enum route_hop_style hop_style;
-
 	/* Channels connecting us to other nodes */
 	union {
 		struct chan_map map;
 		struct chan *arr[NUM_IMMEDIATE_CHANS+1];
 	} chans;
-
-	/* Temporary data for routefinding. */
-	struct {
-		/* Total to get to here from target. */
-		struct amount_msat total;
-		/* Total risk premium of this route. */
-		struct amount_msat risk;
-	} dijkstra;
 };
 
 const struct node_id *node_map_keyof_node(const struct node *n);
@@ -323,30 +280,6 @@ get_channel(const struct routing_state *rstate,
 	return uintmap_get(&rstate->chanmap, scid->u64);
 }
 
-struct route_hop {
-	struct short_channel_id channel_id;
-	int direction;
-	struct node_id nodeid;
-	struct amount_msat amount;
-	u32 delay;
-	struct pubkey *blinding;
-	u8 *enctlv;
-	enum route_hop_style style;
-};
-
-enum exclude_entry_type {
-	EXCLUDE_CHANNEL = 1,
-	EXCLUDE_NODE = 2
-};
-
-struct exclude_entry {
-	enum exclude_entry_type type;
-	union {
-		struct short_channel_id_dir chan_id;
-		struct node_id node_id;
-	} u;
-};
-
 struct routing_state *new_routing_state(const tal_t *ctx,
 					const struct node_id *local_id,
 					struct list_head *peers,
@@ -365,8 +298,7 @@ struct chan *new_chan(struct routing_state *rstate,
 		      const struct short_channel_id *scid,
 		      const struct node_id *id1,
 		      const struct node_id *id2,
-		      struct amount_sat sat,
-		      const u8 *features);
+		      struct amount_sat sat);
 
 /* Handlers for incoming messages */
 
@@ -414,17 +346,6 @@ u8 *handle_node_announcement(struct routing_state *rstate, const u8 *node,
 /* Get a node: use this instead of node_map_get() */
 struct node *get_node(struct routing_state *rstate,
 		      const struct node_id *id);
-
-/* Compute a route to a destination, for a given amount and riskfactor. */
-struct route_hop **get_route(const tal_t *ctx, struct routing_state *rstate,
-			     const struct node_id *source,
-			     const struct node_id *destination,
-			     const struct amount_msat msat, double riskfactor,
-			     u32 final_cltv,
-			     double fuzz,
-			     u64 seed,
-			     struct exclude_entry **excluded,
-			     u32 max_hops);
 
 void route_prune(struct routing_state *rstate);
 
@@ -525,9 +446,6 @@ static inline void local_enable_chan(struct routing_state *rstate,
 	struct local_chan *local_chan = is_local_chan(rstate, chan);
 	local_chan->local_disabled = false;
 }
-
-/* Helper to convert on-wire addresses format to wireaddrs array */
-struct wireaddr *read_addresses(const tal_t *ctx, const u8 *ser);
 
 /* Remove channel from store: announcement and any updates. */
 void remove_channel_from_store(struct routing_state *rstate,

@@ -26,7 +26,10 @@ indefinitely until the peer is online and can negotiate a mutual close.
 The default is 2 days (172800 seconds).
 
 The *destination* can be of any Bitcoin accepted type, including bech32.
-If it isn't specified, the default is a c-lightning wallet address.
+If it isn't specified, the default is a c-lightning wallet address.  If
+the peer hasn't offered the `option_shutdown_anysegwit` feature, then
+taproot addresses (or other v1+ segwit) are not allowed.  Tell your
+friends to upgrade!
 
 The *fee_negotiation_step* parameter controls how closing fee
 negotiation is performed assuming the peer proposes a fee that is
@@ -74,12 +77,14 @@ if the peer is offline and we are waiting.
 RETURN VALUE
 ------------
 
-On success, an object with fields *tx* and *txid* containing the closing
-transaction are returned. It will also have a field *type* which is
-either the JSON string *mutual* or the JSON string *unilateral*. A
-*mutual* close means that we could negotiate a close with the peer,
-while a *unilateral* close means that the *force* flag was set and we
-had to close the channel without waiting for the counterparty.
+[comment]: # (GENERATE-FROM-SCHEMA-START)
+On success, an object is returned, containing:
+- **type** (string): Whether we successfully negotiated a mutual close, closed without them, or discarded not-yet-opened channel (one of "mutual", "unilateral", "unopened")
+
+If **type** is "mutual" or "unilateral":
+  - **tx** (hex): the raw bitcoin transaction used to close the channel (if it was open)
+  - **txid** (txid): the transaction id of the *tx* field
+[comment]: # (GENERATE-FROM-SCHEMA-END)
 
 A unilateral close may still occur at any time if the peer did not
 behave correctly during the close negotiation.
@@ -102,3 +107,4 @@ RESOURCES
 
 Main web site: <https://github.com/ElementsProject/lightning>
 
+[comment]: # ( SHA256STAMP:9159304cd705d8135c32e12bd029c0e95baff0d495e6f9092a75888dab2f5fb3)

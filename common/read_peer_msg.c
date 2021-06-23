@@ -1,5 +1,6 @@
 #include "config.h"
 #include <assert.h>
+#include <bitcoin/chainparams.h>
 #include <ccan/fdpass/fdpass.h>
 #include <common/crypto_sync.h>
 #include <common/gossip_rcvd_filter.h>
@@ -116,15 +117,9 @@ bool is_wrong_channel(const u8 *msg, const struct channel_id *expected,
 void handle_gossip_msg(struct per_peer_state *pps, const u8 *msg TAKES)
 {
 	u8 *gossip;
-	u64 offset_shorter;
 
-	if (fromwire_gossipd_new_store_fd(msg, &offset_shorter)) {
-		gossip_store_switch_fd(pps, fdpass_recv(pps->gossip_fd),
-				       offset_shorter);
-		goto out;
-	} else
-		/* It's a raw gossip msg: this copies or takes() */
-		gossip = tal_dup_talarr(tmpctx, u8, msg);
+	/* It's a raw gossip msg: this copies or takes() */
+	gossip = tal_dup_talarr(tmpctx, u8, msg);
 
 	/* Gossipd can send us gossip messages, OR warnings */
 	if (fromwire_peektype(gossip) == WIRE_WARNING) {
@@ -133,22 +128,27 @@ void handle_gossip_msg(struct per_peer_state *pps, const u8 *msg TAKES)
 	} else {
 		sync_crypto_write(pps, gossip);
 	}
-
-out:
-	if (taken(msg))
-		tal_free(msg);
 }
 
 /* takes iff returns true */
 bool handle_timestamp_filter(struct per_peer_state *pps, const u8 *msg TAKES)
 {
-	struct bitcoin_blkid chain_hash; /* FIXME: don't ignore! */
+	struct bitcoin_blkid chain_hash;
 	u32 first_timestamp, timestamp_range;
 
 	if (!fromwire_gossip_timestamp_filter(msg, &chain_hash,
 					      &first_timestamp,
 					      &timestamp_range)) {
 		return false;
+	}
+
+	if (!bitcoin_blkid_eq(&chainparams->genesis_blockhash, &chain_hash)) {
+		sync_crypto_write(pps,
+				  take(towire_warningfmt(NULL, NULL,
+				       "gossip_timestamp_filter"
+				       " for bad chain: %s",
+				       tal_hex(tmpctx, take(msg)))));
+		return true;
 	}
 
 	gossip_setup_timestamp_filter(pps, first_timestamp, timestamp_range);

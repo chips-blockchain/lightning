@@ -206,6 +206,20 @@ struct command_result *param_channel_id(struct command *cmd, const char *name,
 				     "should be a channel id");
 }
 
+struct command_result *param_short_channel_id(struct command *cmd,
+					      const char *name,
+					      const char *buffer,
+					      const jsmntok_t *tok,
+					      struct short_channel_id **scid)
+{
+	*scid = tal(cmd, struct short_channel_id);
+	if (json_to_short_channel_id(buffer, tok, *scid))
+		return NULL;
+
+	return command_fail_badparam(cmd, name, buffer, tok,
+				     "should be a short_channel_id of form NxNxN");
+}
+
 struct command_result *param_secret(struct command *cmd, const char *name,
 				    const char *buffer, const jsmntok_t *tok,
 				    struct secret **secret)
@@ -419,14 +433,15 @@ json_to_address_scriptpubkey(const tal_t *ctx,
 
 	bip173 = segwit_addr_net_decode(&witness_version, witness_program,
 					&witness_program_len, addrz, chainparams);
-
 	if (bip173) {
-		bool witness_ok = false;
-		if (witness_version == 0 && (witness_program_len == 20 ||
-					     witness_program_len == 32)) {
+		bool witness_ok;
+
+		/* We know the rules for v0, rest remain undefined */
+		if (witness_version == 0) {
+			witness_ok = (witness_program_len == 20 ||
+				       witness_program_len == 32);
+		} else
 			witness_ok = true;
-		}
-		/* Insert other witness versions here. */
 
 		if (witness_ok) {
 			*scriptpubkey = scriptpubkey_witness_raw(ctx, witness_version,
